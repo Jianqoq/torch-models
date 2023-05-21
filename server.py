@@ -4,9 +4,11 @@ import socketserver
 PORT = 8000
 DIRECTORY = r"C:\Users\123\PycharmProjects\ML-library\layers"
 
+
 class CustomHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=DIRECTORY, **kwargs)
+
 
 def start_server(file_name):
     with open(rf"{DIRECTORY}\app1.js", "r", encoding="gbk", errors="ignore") as fp:

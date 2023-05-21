@@ -1,41 +1,48 @@
-import cProfile
+import math
+import os
 
-import random
-import webbrowser
-import subprocess
-import numpy as np
-from matplotlib import pyplot as plt
-from sklearn.base import BaseEstimator
-
-from tensorboardX import SummaryWriter
 import ad
-import signal
-import time, sys
-sys.path.append("..")
+import time
+import random
+import numpy as np
+from sklearn.base import BaseEstimator
+from torch import tensor
+from torch.utils.tensorboard import SummaryWriter
+import torch
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 np.random.seed(42)
 
 
 def print_result(current_epoch, total_epoch, current_iters, total_iters, begin, loss, lr, round=None):
-    list1 = list('[                    ]')
-    list2 = list('[                    ]')
-    epoch_index = int((current_epoch + 1) / total_epoch * 20)
-    iter_index = int((current_iters + 1) / total_iters * 20)
-    epoch_percentage = format(current_epoch * 100 / total_epoch, '.2f')
-    iter_percentage = format(current_iters * 100 / total_iters, '.2f')
-    epoch_index = epoch_index if (0 <= epoch_index < 20) else 20
-    iter_index = iter_index if (0 <= iter_index < 20) else 20
-    list1[1:epoch_index + 1] = u'\u25A0' * epoch_index
+    blocks = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉']
+    list1 = list('│' + ' ' * 20 + '│')  # length 22 last_index: 21
+    list2 = list('│' + ' ' * 20 + '│')  # length 22 last_index: 21
+
+    # epoch index should be 1 <= index <= 20 (200 updates)
+    epoch_percentage = current_epoch * 100 / total_epoch
+    iter_percentage = current_iters * 100 / total_iters
+
+    epoch_index = min(int(epoch_percentage / 5), 20)
+    iter_index = min(int(iter_percentage / 5), 20)
+    epoch_fine = (int(epoch_percentage / 0.625) if epoch_percentage % 0.625 == 0 else math.floor(epoch_percentage / 0.625)) % 8
+    iter_fine = (int(iter_percentage / 0.625) if iter_percentage % 0.625 == 0 else math.floor(iter_percentage / 0.625)) % 8
+
+    list1[1:1 + epoch_index] = '█' * len(list1[1:1 + epoch_index])
+    list2[1:1 + iter_index] = '█' * len(list2[1:1 + iter_index])
+    if epoch_index < 20: list1[1+epoch_index] = blocks[epoch_fine]
+    if iter_index < 20: list2[1+iter_index] = blocks[iter_fine]
     string1 = ''.join(list1)
-    list2[1:iter_index + 1] = u'\u25A0' * iter_index
     string2 = ''.join(list2)
+
     time1 = time.time() - begin
-    print(f'\rEpoch: {string1} {epoch_percentage}% |'
-          f' Iters: {string2} {iter_percentage}% | Time: {time1:.3f}s | loss: {loss:.3f} | lr: {lr:.3f} | current round: {round}',
+    print(f'\rEpoch: {string1} {format(epoch_percentage, ".2f")}% |'
+          f' Iters: {string2} {format(iter_percentage, ".2f")}% | Time: {time1:.3f}s | loss: {loss:.3f} | lr: {lr:.3f}'
+          f' | current round: {round}',
           end='',
           flush=True)
 
 
-def softmax(x, dims):
+def softmax(x, dims=0):
     x = x - x.max(axis=dims, keepdims=True)
     x_exp = np.exp(x)
     result = np.sum(x_exp, axis=dims, keepdims=True)
@@ -94,7 +101,7 @@ def remove_duplicate(params, grads):
                     grads.pop(j)
                 # 転置行列として重みを共有する場合（weight tying）
                 elif params[i].ndim == 2 and params[j].ndim == 2 and \
-                     params[i].T.shape == params[j].shape and np.all(params[i].T == params[j]):
+                        params[i].T.shape == params[j].shape and np.all(params[i].T == params[j]):
                     grads[i] += grads[j].T
                     find_flg = True
                     params.pop(j)
@@ -146,6 +153,7 @@ class RNN:
     :param w_input: shape(vocab_size, hidden_size)
     :param w_prev: shape(hidden_size, hidden_size)
     """
+
     def __init__(self, w_input, w_prev, b):
         self.weights, self.grads = [w_input, w_prev, b], []
         self.Matmul1 = MatMul(w_prev)
@@ -175,11 +183,36 @@ class RNN:
 
     def backward(self, dh_next):
         x, h_prev, h_next = self.cache
-        dt = dh_next*(1 - np.square(h_next))
+        dt = dh_next * (1 - np.square(h_next))
         db = np.sum(dt, axis=0)
         dx = self.Matmul1.backward(db)
         dh_next = self.Matmul2.backward(db)
         return dh_next, dx
+
+
+class MatMul:
+
+    def __init__(self, W):
+        self.weights = [W]
+        self.X = None
+        self.gradients = [np.zeros_like(W)]
+
+    def forward(self, forward_input):
+        W, = self.weights
+        output = np.dot(forward_input, W)
+        self.X = forward_input
+        return output
+
+    def backward(self, d_backward_input):
+        # get weights and calculate dX
+        W = self.weights[0]
+        dX = np.dot(d_backward_input, W.T)
+
+        # use stored input to and dinput to calculate dW and store to self.gradients list
+        dW = np.dot(self.X.T, d_backward_input)
+        self.gradients[0][...] = dW
+
+        return dX
 
 
 class TimeRNN:
@@ -224,6 +257,35 @@ class TimeRNN:
         self.dh = dh
         return dxs
 
+class SoftmaxWithLoss:
+    """
+    general SoftmaxWithLoss
+    """
+    def __init__(self):
+        self.x, self.y = None, None
+
+    def forward(self, x, true):
+        score = softmax(x)
+
+        def multi_cross_entropy_error(y, t):
+            if y.ndim == 1:
+                t = t.reshape(1, t.size)
+                y = y.reshape(1, y.size)
+
+            if t.size == y.size:
+                t = t.argmax(axis=1)
+
+            batch_size = y.shape[0]
+            return -np.sum(np.log(y[np.arange(batch_size), t] + 1e-7)) / batch_size
+
+        loss = multi_cross_entropy_error(score, true)
+        self.y = score
+        self.x = true
+        return loss
+
+    def backward(self):
+        return self.y - self.x
+
 
 class TimeSigmoidWithLoss:
     def __init__(self, length):
@@ -235,7 +297,7 @@ class TimeSigmoidWithLoss:
         total_loss = 0
         for index, i in enumerate(zip(x_sequence, t_sequence)):
             total_loss += self.layers[index].forward(*i)
-        return total_loss/x_sequence.shape[1]
+        return total_loss / x_sequence.shape[1]
 
     def backward(self):
         return np.array([i.backward() for i in self.layers])
@@ -276,7 +338,7 @@ class TimeAffine:
         N, T, D = x_sequence.shape
         W, b = self.weights
 
-        rx = x_sequence.reshape(N*T, -1)
+        rx = x_sequence.reshape(N * T, -1)
         out = np.dot(rx, W) + b
         self.x = x_sequence
         out = out.reshape(N, T, -1)
@@ -300,8 +362,8 @@ class TimeAffine:
         N, T, D = x.shape
         W, b = self.weights
 
-        dout = d_sequence.reshape(N*T, -1)
-        rx = x.reshape(N*T, -1)
+        dout = d_sequence.reshape(N * T, -1)
+        rx = x.reshape(N * T, -1)
 
         db = np.sum(dout, axis=0)
         dW = np.dot(rx.T, dout)
@@ -423,6 +485,7 @@ class Preprocess:
                     if cnt % (total // 200) == 0:
                         print_result(cnt + 1, total, begin, time())
         return ppmi_matrix
+
     #
     # def most_similar(self, matrix: list, word: str, word_id: dict, top: int):
     #     word = word.lower()
@@ -629,7 +692,8 @@ class LSTM:
 
         def sigmoid(x):
             return 1 / (1 + np.exp(-x))
-        first = x@wx + h@wh + b
+
+        first = x @ wx + h @ wh + b
 
         slice1, slice2, slice3, slice4 = np.array([np.squeeze(i) for i in np.split(first, 4, axis=1)])
 
@@ -638,7 +702,7 @@ class LSTM:
         slice3 = sigmoid(slice3)
         slice4 = sigmoid(slice4)
 
-        ct = slice1*c + slice2*slice3
+        ct = slice1 * c + slice2 * slice3
         ht = slice4 * np.tanh(ct)
 
         self.__var = (ct, ht, h, c, x, wh, wx, slice1, slice2, slice3, slice4)
@@ -658,7 +722,7 @@ class LSTM:
         i_1 = 1 - i
 
         stack0 = (dh_next_o_f * tang_c_2_1 + dc_next * f) * c * f_1
-        stack1 = (dh_next_o_i*(1-tang_c_2) + dc_next_i) * (1 - g**2)
+        stack1 = (dh_next_o_i * (1 - tang_c_2) + dc_next_i) * (1 - g ** 2)
         stack2 = (dh_next_o_i * tang_c_2_1 + dc_next_i) * g * i_1
         stack3 = dh_next * ht * (1 - o)
         db = np.hstack((stack0, stack1, stack2, stack3))
@@ -667,13 +731,14 @@ class LSTM:
         dWh = h.T @ db
         dx = db @ wx.T
         dh = db @ wh.T
-        dc = dh_next_o_f*(1 - tang_c_2) + dc_next * f
+        dc = dh_next_o_f * (1 - tang_c_2) + dc_next * f
 
         self.grads[0][...] = dWx
         self.grads[1][...] = dWh
         self.grads[2][...] = np.sum(db, axis=0)
 
         return dx, dh, dc
+
 
 class TimeDropout:
     def __init__(self, dropout_ratio=0.5):
@@ -786,7 +851,7 @@ class RnnlmTrainer:
         model, optimizer = self.model, self.optimizer
         total_loss = 0
         loss_count = 0
-        total = max_epoch*max_iters
+        total = max_epoch * max_iters
         begin = time.time()
         count = 0
         for epoch in range(max_epoch):
@@ -835,10 +900,10 @@ class Encoder:
     def __init__(self, vocab_size, wordvec_size=100, hidden_size=100):
         if isinstance(vocab_size, list):
             vocab_size = vocab_size[0]
-        w1, w2, w3, b = np.random.randn(vocab_size, wordvec_size) / 100,\
-                        np.random.randn(wordvec_size, 4 * hidden_size) / np.sqrt(wordvec_size),\
-                        np.random.randn(hidden_size, 4 * hidden_size) / np.sqrt(hidden_size),\
-                        np.zeros(4 * hidden_size)
+        w1, w2, w3, b = np.random.randn(vocab_size, wordvec_size) / 100, \
+                        np.random.randn(wordvec_size, 4 * hidden_size) / np.sqrt(wordvec_size), \
+                        np.random.randn(hidden_size, 4 * hidden_size) / np.sqrt(hidden_size), \
+            np.zeros(4 * hidden_size)
         self.layers = [TimeEmbedding(w1),
                        TimeLSTM(w2, w3, b, stateful=False)]
 
@@ -865,11 +930,11 @@ class Encoder:
 
 class Decoder:
     def __init__(self, vocab_size=12, wordvec_size=100, hidden_size=100):
-        w1, w2, w3, w4, b = np.random.randn(vocab_size, wordvec_size) / 100,\
-                        np.random.randn(wordvec_size + hidden_size, 4 * hidden_size) / np.sqrt(wordvec_size),\
-                        np.random.randn(hidden_size, 4 * hidden_size) / np.sqrt(hidden_size), \
-                        np.random.randn(hidden_size * 2, vocab_size) / np.sqrt(hidden_size), \
-                        np.zeros(4 * hidden_size)
+        w1, w2, w3, w4, b = np.random.randn(vocab_size, wordvec_size) / 100, \
+                            np.random.randn(wordvec_size + hidden_size, 4 * hidden_size) / np.sqrt(wordvec_size), \
+                            np.random.randn(hidden_size, 4 * hidden_size) / np.sqrt(hidden_size), \
+                            np.random.randn(hidden_size * 2, vocab_size) / np.sqrt(hidden_size), \
+            np.zeros(4 * hidden_size)
         b1 = np.zeros(vocab_size)
         self.layers = [TimeEmbedding(w1),
                        TimeLSTM(w2, w3, b, stateful=True),
@@ -936,7 +1001,7 @@ class Seq2Seq:
         self.decoder = Decoder(vocab_size, wordvec_size, hidden_size)
         self.loss_layer = TimeSoftmaxWithLoss()
         self.word_id = word_id
-        self.weights = self.encoder.weights+self.decoder.weights
+        self.weights = self.encoder.weights + self.decoder.weights
         self.grads = self.encoder.grads + self.decoder.grads
 
     def forward(self, xs, ts):
@@ -1094,7 +1159,7 @@ class AttentionDecoder:
         lstm_Wx = (rn(D, 4 * H) / np.sqrt(D)).astype('f')
         lstm_Wh = (rn(H, 4 * H) / np.sqrt(H)).astype('f')
         lstm_b = np.zeros(4 * H).astype('f')
-        affine_W = (rn(2*H, V) / np.sqrt(2*H)).astype('f')
+        affine_W = (rn(2 * H, V) / np.sqrt(2 * H)).astype('f')
         affine_b = np.zeros(V).astype('f')
 
         self.embed = TimeEmbedding(embed_W)
@@ -1173,7 +1238,7 @@ class AttentionSeq2seq(Seq2Seq, BaseEstimator):
         self.encoder = AttentionEncoder(vocab_size, wordvec_size, hidden_size)
         self.decoder = AttentionDecoder(vocab_size, wordvec_size, hidden_size)
         self.loss_layer = TimeSoftmaxWithLoss()
-        self.weights = self.encoder.weights+self.decoder.weights
+        self.weights = self.encoder.weights + self.decoder.weights
         self.grads = self.encoder.grads + self.decoder.grads
         self.word_id = word_id
         self.vocab_size = vocab_size
@@ -1189,6 +1254,7 @@ class AttentionSeq2seq(Seq2Seq, BaseEstimator):
         begin = time.time()
         global round0
         round0 += 1
+
         def clip_grad(grads, max_grad):
             total = 0
             for grad in grads:
@@ -1329,14 +1395,14 @@ class TransformerDecoder:
 
 
 class MultiHeadAttention:
-    def __init__(self, wordvec_size, hidden_size,  num_heads):
+    def __init__(self, wordvec_size, hidden_size, num_heads):
         self.num_heads = num_heads
         self.d_k = wordvec_size // num_heads
         assert isinstance(self.d_k, int), f"{self.d_k} is not int"
         self.weights = [np.random.randn(wordvec_size, hidden_size),
                         np.random.randn(wordvec_size, hidden_size),
                         np.random.randn(wordvec_size, hidden_size),
-                        np.random.randn(wordvec_size, hidden_size),]
+                        np.random.randn(wordvec_size, hidden_size), ]
         self.cache = None
 
     def forward(self, query, key, value):
@@ -1406,15 +1472,18 @@ def generate_subtraction(filename):
 def generate_division(filename):
     seq = []
     with open(filename, "w") as fp:
-        for i in range(100, 750):
+        for i in range(100, 7500):
             for k in range(1, 127):
                 result = i / k
                 string1 = f"{i}/{k}"
                 string2 = f"_{round(result, 8)}"
-                o1 = f"{string1:7}{string2:13}\n"
+                o1 = f"{string1:8}{string2:14}\n"
                 seq.append(o1)
         random.shuffle(seq)
         fp.writelines(seq)
+
+
+generate_division("division_shuffle.txt")
 
 
 def generate_multiplication(filename):
@@ -1431,7 +1500,7 @@ def generate_multiplication(filename):
         fp.writelines(seq)
 
 
-def get_question_and_answer(*filename, train_ratio=0.96, reverse=True):
+def get_question_and_answer(*filename, train_ratio=0.9, reverse=True, gpu=True, torch=False):
     o = ""
     for name in filename:
         with open(name, "r") as fp:
@@ -1443,7 +1512,7 @@ def get_question_and_answer(*filename, train_ratio=0.96, reverse=True):
     question = []
     answer = []
     question_and_answer = o.split('\n')
-    random.shuffle(question_and_answer)
+    # random.shuffle(question_and_answer)
     o1 = []
     o2 = []
     for i in question_and_answer:
@@ -1471,21 +1540,33 @@ def get_question_and_answer(*filename, train_ratio=0.96, reverse=True):
     for ls in answer:
         for index, k in enumerate(ls):
             ls[index] = word_id[k]
-
-    train_index = int(len(question) * train_ratio)
-    train_questions = np.array(question[:train_index])
-    test_questions = np.array(question[train_index:])
-    train_answer = np.array(answer[:train_index])
-    test_answer = np.array(answer[train_index:])
-
-    return train_questions, test_questions,  train_answer,  test_answer, word_id, id_word
+    if not torch:
+        train_index = int(len(question) * train_ratio)
+        train_q = np.array(question[:train_index])
+        test_q = np.array(question[train_index:])
+        train_a = np.array(answer[:train_index])
+        test_a = np.array(answer[train_index:])
+        return train_q, test_q, train_a, test_a, word_id, id_word
+    elif torch and not gpu:
+        train_index = int(len(question) * train_ratio)
+        train_q = tensor(question[:train_index]).long()
+        test_q = tensor(question[train_index:]).long()
+        train_a = tensor(answer[:train_index]).long()
+        test_a = tensor(answer[train_index:]).long()
+        return train_q, test_q, train_a, test_a, word_id, id_word
+    elif torch and gpu:
+        train_index = int(len(question) * train_ratio)
+        train_q = tensor(question[:train_index]).long().to(device)
+        test_q = tensor(question[train_index:]).long().to(device)
+        train_a = tensor(answer[:train_index]).long().to(device)
+        test_a = tensor(answer[train_index:]).long().to(device)
+        return train_q, test_q, train_a, test_a, word_id, id_word
 
 
 def evaluate(model, question, answer, word_id, id_word, size):
     answers = model.generate(question, word_id, size)
     question = [id_word[int(i)] for i in question[0]]
     o = [id_word[int(i)] for i in answers]
-    print(''.join(reversed(question)), "=", ''.join(o))
     return 1 if answers == list(answer[:, 1:][0]) else 0
 
 
@@ -1495,22 +1576,14 @@ class Train:
         self.writer = None
         self.url = None
         self.browser = None
-        signal.signal(signal.SIGINT, self.delete_current_file)
-        signal.signal(signal.SIGTERM, self.delete_current_file)
+        self.tensorboard_process = None
 
     def train(self, model, optimizer, train_questions, train_answer, test_questions, test_answer, batch_size, max_epoch,
-              word_id, id_word, log_dir=None, Tensorboard_reloadInterval=30, log_file_name='', Enale_Tensorboard=True):
+              word_id, id_word):
         max_iter = len(train_questions) // batch_size
         loss_cumulate = 0
         begin = time.time()
         size = len(train_answer[0, :]) - 1
-        if Enale_Tensorboard:
-            self.writer = writer = SummaryWriter(filename_suffix=log_file_name)
-            self.Tensorboard_logdir = writer.logdir
-            writer.add_scalar("Correctness", 0, 0)
-            writer.flush()
-            time.sleep(5)
-            tensorboard_process, self.url = self.open_Tensorboard(log_dir, Tensorboard_reloadInterval, view=False)
 
         for epoch in range(max_epoch):
             correct = 0
@@ -1530,31 +1603,27 @@ class Train:
             for i in range(len(test_questions)):
                 question, answer = test_questions[[i]], test_answer[[i]]
                 correct += evaluate(model, question, answer, word_id, id_word, size)
-            if Enale_Tensorboard:
-                writer.add_scalar("Correctness", correct / len(test_questions), epoch)
-        if Enale_Tensorboard:
-            writer.close()
-            tensorboard_process.terminate()
+            if self.writer is not None:
+                self.writer.add_scalar("Correctness", correct / len(test_questions), epoch)
+        if self.writer is not None and self.tensorboard_process is not None:
+            self.writer.close()
+            self.tensorboard_process.terminate()
 
-    def PYTORCH_train(self, model, optimizer, train_questions, train_answer, test_questions, test_answer, batch_size, max_epoch,
-              word_id, id_word, log_dir=None, Tensorboard_reloadInterval=30, log_file_name='', Enale_Tensorboard=True):
-        max_iter = len(train_questions) // batch_size
+    def PYTORCH_train(self, model, optimizer, train_question, train_answers, test_question, test_answers, batch_size,
+                      max_epoch, word_id, id_word, log=True, log_dir=None, Tensorboard_reloadInterval=30, log_file_name=''):
+        max_iter = len(train_question) // batch_size
         loss_cumulate = 0
         begin = time.time()
-        size = len(train_answer[0, :]) - 1
-        if Enale_Tensorboard:
-            self.writer = writer = SummaryWriter(filename_suffix=log_file_name)
-            self.Tensorboard_logdir = writer.logdir
-            writer.add_scalar("Correctness", 0, 0)
-            writer.flush()
-            time.sleep(5)
-            tensorboard_process, self.url = self.open_Tensorboard(log_dir, Tensorboard_reloadInterval, view=False)
+        size = len(train_answers[0, :]) - 1
+        average_loss = 0
+        if log:
+            self.open_tensorboard(log_dir, Tensorboard_reloadInterval, f"({log_file_name})")
 
         for epoch in range(max_epoch):
             correct = 0
             for iters in range(max_iter):
-                batch_question = train_questions[iters * batch_size:(iters + 1) * batch_size]
-                batch_answer = train_answer[iters * batch_size:(iters + 1) * batch_size]
+                batch_question = train_question[iters * batch_size:(iters + 1) * batch_size]
+                batch_answer = train_answers[iters * batch_size:(iters + 1) * batch_size]
                 optimizer.zero_grad()
                 loss = model.forward(batch_question, batch_answer)
                 loss.backward()
@@ -1562,100 +1631,91 @@ class Train:
 
                 loss_cumulate += loss
 
-                if (iters + 1) % 10 == 0:
+                if iters % 10 == 0:
                     average_loss = loss_cumulate / 10
                     loss_cumulate = 0
-                    print_result(epoch + 1, max_epoch, iters + 1, max_iter, begin, average_loss, optimizer.param_groups[0]['lr'])
-            for i in range(len(test_questions)):
-                question, answer = test_questions[[i]], test_answer[[i]]
+                    print_result(epoch, max_epoch, iters, max_iter, begin, average_loss,
+                                 optimizer.param_groups[0]['lr'])
+            print_result(epoch, max_epoch, max_iter, max_iter, begin, average_loss,
+                         optimizer.param_groups[0]['lr'])
+            for i in range(len(test_question)):
+                question, answer = test_question[[i]], test_answers[[i]]
                 correct += evaluate(model, question, answer, word_id, id_word, size)
-            if Enale_Tensorboard:
-                writer.add_scalar("Correctness", correct / len(test_questions), epoch)
-        if Enale_Tensorboard:
-            writer.close()
-            tensorboard_process.terminate()
+            if self.writer is not None:
+                self.writer.add_scalar("Correctness", correct / len(test_question), epoch)
 
-    def delete_current_file(self, *args):
-        if self.Tensorboard_logdir is not None:
-            from shutil import rmtree
+        print_result(max_epoch, max_epoch, max_iter, max_iter, begin, average_loss,
+                     optimizer.param_groups[0]['lr'])
+        if self.writer is not None and self.tensorboard_process is not None:
             self.writer.close()
-            rmtree(self.Tensorboard_logdir)
+            self.tensorboard_process.terminate()
+
+    def open_tensorboard(self, log_dir=None, Tensorboard_reloadInterval=30, log_file_name=''):
+        directory = None
+        if log_dir is not None:
+            from datetime import datetime
+            import socket
+            current_time = datetime.now().strftime("%b%d_%H-%M-%S")
+            directory = os.path.join(
+                os.getcwd(), f"{log_dir}", current_time + "_" + socket.gethostname()
+            )
+            log_dir = os.path.join(os.getcwd(), f"{log_dir}")
+        self.writer = writer = SummaryWriter(log_dir=directory, filename_suffix=log_file_name)
+        self.Tensorboard_logdir = writer.log_dir
+        writer.add_scalar("Correctness", 0, 0)
+        writer.flush()
+        self.open_Tensorboard(log_dir, Tensorboard_reloadInterval)
+
 
     @staticmethod
-    def open_Tensorboard(log_dir=None, Tensorboard_reloadInterval=30, view=True):
-        log_dir = 'C:/Users/123/PycharmProjects/ML-library/layers/runs' if log_dir is None else log_dir
+    def open_Tensorboard(log_dir=None, Tensorboard_reloadInterval=30):
+        log_dir = rf'{os.getcwd()}\runs' if log_dir is None else log_dir
         tensorboard_port = 6006
-        url = tensorboard_url = f'http://localhost:{tensorboard_port}'
-        tensorboard_process = subprocess.Popen(
-            ['tensorboard', f'--logdir={log_dir}', f'--port={tensorboard_port}',
-             f'--reload_interval={Tensorboard_reloadInterval}'], shell=True
-        )
-        webbrowser.open(tensorboard_url)
-        if view:
-            time.sleep(10)
-        return tensorboard_process, url
+        print('copy to run:', ''.join(['tensorboard', f' --logdir={log_dir}', f' --port={tensorboard_port}',
+                                       f' --reload_interval={Tensorboard_reloadInterval}']))
 
 
 if __name__ == "__main__":
-    from sklearn.model_selection import RandomizedSearchCV
-
-    # 定义超参数搜索范围
-    round0 = 0
-    train_questions, test_questions, train_answer, test_answer, word_id, id_word = get_question_and_answer("division_shuffle.txt")
-    # 初始化你的模型
-    vocab_size = len(word_id)
-    wordvec_size = 16
-    hidden_size = 128
-    max_epoch = 200
-    max_grad = 5.0
-    model = AttentionSeq2seq(word_id, vocab_size, wordvec_size, hidden_size)
-    # 创建随机搜索对象
-    param_dist = {
-        'word_id': [word_id],
-        'vocab_size': [vocab_size],
-        'wordvec_size': [random.randint(8, 8) for i in range(1)],
-        'hidden_size': [random.randint(8, 8) for k in range(1)]
-    }
-    random_search = RandomizedSearchCV(
-        model, param_distributions=param_dist, n_iter=50, cv=5)
-    fit_params = {
-        'X_test': test_questions,
-        'y_test': test_answer,
-        'optimizer': Adam(),
-        'batch_size': 2048,
-        'max_grad': max_grad,
-        'max_epoch': max_epoch
-    }
+    print(os.getcwd())
+    # from sklearn.model_selection import RandomizedSearchCV
     #
-    random_search.fit(train_questions, train_answer, **fit_params)
-
-    best_params = random_search.best_params_
-    print("Best parameters found: ", best_params)
-    results = random_search.cv_results_
-    plt.plot(results['mean_train_score'], label='train')
-    plt.plot(results['mean_test_score'], label='validation')
-    plt.xlabel('Hyperparameter combinations')
-    plt.ylabel('Accuracy')
-    plt.legend()
-    plt.savefig('result.png')
-    # def main():
-    #     def calculate():
-    #         for _ in range(5000):
-    #             wx = np.random.randn(10, 6)
-    #             wh = np.random.randn(10, 6, 1)
-    #             b = np.random.randn(1, 6)
-    #             x = np.random.randn(6, 10)
-    #             h = np.random.randn(6, 6)
-    #             c = np.random.randn(40, 10)
-    #             lstm = FeedForward(wx, b)
-    #             lstm.forward(x)
-    #             lstm.backward(h)
+    # # 定义超参数搜索范围
+    # round0 = 0
+    # train_questions, test_questions, train_answer, test_answer, _word_id, _id_word = get_question_and_answer(
+    #     "division_shuffle.txt")
+    # # 初始化你的模型
+    # vocab_size = len(_word_id)
+    # wordvec_size = 16
+    # hidden_size = 128
+    # _max_epoch = 200
+    # _max_grad = 5.0
+    # model = AttentionSeq2seq(_word_id, vocab_size, wordvec_size, hidden_size)
+    # # 创建随机搜索对象
+    # param_dist = {
+    #     'word_id': [_word_id],
+    #     'vocab_size': [vocab_size],
+    #     'wordvec_size': [random.randint(8, 8) for i in range(1)],
+    #     'hidden_size': [random.randint(8, 8) for k in range(1)]
+    # }
+    # random_search = RandomizedSearchCV(
+    #     model, param_distributions=param_dist, n_iter=50, cv=5)
+    # fit_params = {
+    #     'X_test': test_questions,
+    #     'y_test': test_answer,
+    #     'optimizer': Adam(),
+    #     'batch_size': 2048,
+    #     'max_grad': _max_grad,
+    #     'max_epoch': _max_epoch
+    # }
+    # #
+    # random_search.fit(train_questions, train_answer, **fit_params)
     #
-    #     begin = time.time()
-    #     calculate()
-    #     calculate()
-    #     end = time.time() - begin
-    #     print(end)
-    #
-    # main()
-
+    # best_params = random_search.best_params_
+    # print("Best parameters found: ", best_params)
+    # results = random_search.cv_results_
+    # plt.plot(results['mean_train_score'], label='train')
+    # plt.plot(results['mean_test_score'], label='validation')
+    # plt.xlabel('Hyperparameter combinations')
+    # plt.ylabel('Accuracy')
+    # plt.legend()
+    # plt.savefig('result.png')

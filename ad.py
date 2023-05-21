@@ -1,13 +1,10 @@
 import inspect
-
 import numpy
-
 import server
 import numpy as np
 import graphviz
 import random
 from time import time
-
 import matplotlib.pyplot as plt
 
 
