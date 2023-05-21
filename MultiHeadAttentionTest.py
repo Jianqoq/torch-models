@@ -77,28 +77,27 @@ class Decoder(torch.nn.Module):
             sample_id = torch.argmax(score.flatten())
             sampled.append(sample_id)
         self.h_n, self.c_n = None, None
-        self.h_n2, self.c_n2 = None, None
         return sampled
 
 
-batch = 10
+batch = 100
 sentence_length = 30
-corpus_size = 100
 train_questions, test_questions, train_answer, test_answer, word_id, id_word = get_question_and_answer(
-    r"C:\Users\123\PycharmProjects\torch-models\data-set\symbolic computation\multiplication_shuffle.txt",
+    r"C:\Users\123\PycharmProjects\torch-models\data-set\symbolic computation\division_shuffle.txt",
     torch=True, train_ratio=0.96)
 vocab_size = len(word_id)
 wordvec_size = 16
 hidden_size = 128
-max_epoch = 50
+max_epoch = 100
 num_head = 8
 num_layers = 1
 output_dim = 64
-transformer = Transformer(vocab_size, wordvec_size, hidden_size, num_head, num_layers)
-transformer.to(device)
-optimizer = torch.optim.Adam(transformer.parameters())
+seq2seq = Seq2Seq(vocab_size, wordvec_size, hidden_size, num_head, num_layers)
+seq2seq.to(device)
+optimizer = torch.optim.Adam(seq2seq.parameters())
 trainer = Train()
-transformer.train()
-trainer.PYTORCH_train(transformer, optimizer, train_questions, train_answer, test_questions, test_answer, batch,
-                      max_epoch, word_id, id_word, log_dir="multiplication", log=True,
-                      log_file_name="Encoder3LSTM, Decoder1LSTM + 1Attention + 2LSTM + affine")
+seq2seq.train()
+trainer.PYTORCH_train(seq2seq, optimizer, train_questions, train_answer, test_questions, test_answer, batch,
+                      max_epoch, word_id, log_dir="division", log=True,
+                      log_file_name="Encoder1LSTM, Decoder1LSTM + 1Attention + affine")
+torch.save(seq2seq.state_dict(), 'model_weights.pth')

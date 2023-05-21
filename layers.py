@@ -1483,7 +1483,7 @@ def generate_division(filename):
         fp.writelines(seq)
 
 
-generate_division("division_shuffle.txt")
+generate_division("data-set/symbolic computation/division_shuffle.txt")
 
 
 def generate_multiplication(filename):
@@ -1500,7 +1500,7 @@ def generate_multiplication(filename):
         fp.writelines(seq)
 
 
-def get_question_and_answer(*filename, train_ratio=0.9, reverse=True, gpu=True, torch=False):
+def get_question_and_answer(*filename, train_ratio=0.9, reverse=True, gpu=True, torch=False, shuffle=True):
     o = ""
     for name in filename:
         with open(name, "r") as fp:
@@ -1512,7 +1512,8 @@ def get_question_and_answer(*filename, train_ratio=0.9, reverse=True, gpu=True, 
     question = []
     answer = []
     question_and_answer = o.split('\n')
-    # random.shuffle(question_and_answer)
+    if shuffle:
+        random.shuffle(question_and_answer)
     o1 = []
     o2 = []
     for i in question_and_answer:
@@ -1563,10 +1564,8 @@ def get_question_and_answer(*filename, train_ratio=0.9, reverse=True, gpu=True, 
         return train_q, test_q, train_a, test_a, word_id, id_word
 
 
-def evaluate(model, question, answer, word_id, id_word, size):
+def evaluate(model, question, answer, word_id, size):
     answers = model.generate(question, word_id, size)
-    question = [id_word[int(i)] for i in question[0]]
-    o = [id_word[int(i)] for i in answers]
     return 1 if answers == list(answer[:, 1:][0]) else 0
 
 
@@ -1602,7 +1601,7 @@ class Train:
                     print_result(epoch + 1, max_epoch, iters + 1, max_iter, begin, average_loss, optimizer.lr)
             for i in range(len(test_questions)):
                 question, answer = test_questions[[i]], test_answer[[i]]
-                correct += evaluate(model, question, answer, word_id, id_word, size)
+                correct += evaluate(model, question, answer, word_id, size)
             if self.writer is not None:
                 self.writer.add_scalar("Correctness", correct / len(test_questions), epoch)
         if self.writer is not None and self.tensorboard_process is not None:
@@ -1610,7 +1609,7 @@ class Train:
             self.tensorboard_process.terminate()
 
     def PYTORCH_train(self, model, optimizer, train_question, train_answers, test_question, test_answers, batch_size,
-                      max_epoch, word_id, id_word, log=True, log_dir=None, Tensorboard_reloadInterval=30, log_file_name=''):
+                      max_epoch, word_id, log=True, log_dir=None, Tensorboard_reloadInterval=30, log_file_name=''):
         max_iter = len(train_question) // batch_size
         loss_cumulate = 0
         begin = time.time()
@@ -1640,7 +1639,7 @@ class Train:
                          optimizer.param_groups[0]['lr'])
             for i in range(len(test_question)):
                 question, answer = test_question[[i]], test_answers[[i]]
-                correct += evaluate(model, question, answer, word_id, id_word, size)
+                correct += evaluate(model, question, answer, word_id, size)
             if self.writer is not None:
                 self.writer.add_scalar("Correctness", correct / len(test_question), epoch)
 
@@ -1676,7 +1675,7 @@ class Train:
 
 
 if __name__ == "__main__":
-    print(os.getcwd())
+    pass
     # from sklearn.model_selection import RandomizedSearchCV
     #
     # # 定义超参数搜索范围
