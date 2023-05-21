@@ -8,7 +8,7 @@ torch.backends.cudnn.deterministic = True
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
-class Transformer(torch.nn.Module):
+class Seq2Seq(torch.nn.Module):
     def __init__(self, corpus, embedding_dim, hidden_size, num_head, num_layers):
         super().__init__()
         self.encoder = Encoder(corpus, embedding_dim, hidden_size, num_layers)
