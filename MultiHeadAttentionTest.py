@@ -1,4 +1,3 @@
-
 from torch import nn, tensor
 import torch
 from layers import get_question_and_answer, Train
