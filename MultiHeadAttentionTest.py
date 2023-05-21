@@ -94,11 +94,11 @@ max_epoch = 50
 num_head = 8
 num_layers = 1
 output_dim = 64
-transformer = Transformer(vocab_size, wordvec_size, hidden_size, num_head, num_layers)
-transformer.to(device)
-optimizer = torch.optim.Adam(transformer.parameters())
+seq2seq = Seq2Seq(vocab_size, wordvec_size, hidden_size, num_head, num_layers)
+seq2seq.to(device)
+optimizer = torch.optim.Adam(seq2seq.parameters())
 trainer = Train()
-transformer.train()
-trainer.PYTORCH_train(transformer, optimizer, train_questions, train_answer, test_questions, test_answer, batch,
+seq2seq.train()
+trainer.PYTORCH_train(seq2seq, optimizer, train_questions, train_answer, test_questions, test_answer, batch,
                       max_epoch, word_id, id_word, log_dir="multiplication", log=True,
                       log_file_name="Encoder3LSTM, Decoder1LSTM + 1Attention + 2LSTM + affine")
