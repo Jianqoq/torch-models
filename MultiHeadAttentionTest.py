@@ -94,9 +94,9 @@ output_dim = 64
 seq2seq = Seq2Seq(vocab_size, wordvec_size, hidden_size, num_head, num_layers)
 seq2seq.to(device)
 optimizer = torch.optim.Adam(seq2seq.parameters())
-trainer = Train()
+trainer = Train(seq2seq, optimizer)
 seq2seq.train()
-trainer.PYTORCH_train(seq2seq, optimizer, train_questions, train_answer, test_questions, test_answer, batch,
+trainer.PYTORCH_train(train_questions, train_answer, test_questions, test_answer, batch,
                       max_epoch, word_id, log_dir="division", log=True,
                       log_file_name="Encoder1LSTM, Decoder1LSTM + 1Attention + affine")
 torch.save(seq2seq.state_dict(), 'model_weights.pth')

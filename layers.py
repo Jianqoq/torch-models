@@ -13,35 +13,6 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 np.random.seed(42)
 
 
-def print_result(current_epoch, total_epoch, current_iters, total_iters, begin, loss, lr, round=None):
-    blocks = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉']
-    list1 = list('│' + ' ' * 20 + '│')  # length 22 last_index: 21
-    list2 = list('│' + ' ' * 20 + '│')  # length 22 last_index: 21
-
-    # epoch index should be 1 <= index <= 20 (200 updates)
-    epoch_percentage = current_epoch * 100 / total_epoch
-    iter_percentage = current_iters * 100 / total_iters
-
-    epoch_index = min(int(epoch_percentage / 5), 20)
-    iter_index = min(int(iter_percentage / 5), 20)
-    epoch_fine = (int(epoch_percentage / 0.625) if epoch_percentage % 0.625 == 0 else math.floor(epoch_percentage / 0.625)) % 8
-    iter_fine = (int(iter_percentage / 0.625) if iter_percentage % 0.625 == 0 else math.floor(iter_percentage / 0.625)) % 8
-
-    list1[1:1 + epoch_index] = '█' * len(list1[1:1 + epoch_index])
-    list2[1:1 + iter_index] = '█' * len(list2[1:1 + iter_index])
-    if epoch_index < 20: list1[1+epoch_index] = blocks[epoch_fine]
-    if iter_index < 20: list2[1+iter_index] = blocks[iter_fine]
-    string1 = ''.join(list1)
-    string2 = ''.join(list2)
-
-    time1 = time.time() - begin
-    print(f'\rEpoch: {string1} {format(epoch_percentage, ".2f")}% |'
-          f' Iters: {string2} {format(iter_percentage, ".2f")}% | Time: {time1:.3f}s | loss: {loss:.3f} | lr: {lr:.3f}'
-          f' | current round: {round}',
-          end='',
-          flush=True)
-
-
 def softmax(x, dims=0):
     x = x - x.max(axis=dims, keepdims=True)
     x_exp = np.exp(x)
@@ -1483,9 +1454,6 @@ def generate_division(filename):
         fp.writelines(seq)
 
 
-generate_division("data-set/symbolic computation/division_shuffle.txt")
-
-
 def generate_multiplication(filename):
     seq = []
     with open(filename, "w") as fp:
@@ -1564,20 +1532,22 @@ def get_question_and_answer(*filename, train_ratio=0.9, reverse=True, gpu=True, 
         return train_q, test_q, train_a, test_a, word_id, id_word
 
 
-def evaluate(model, question, answer, word_id, size):
+def evaluate(model, question, answer, word_id, id_word, size):
     answers = model.generate(question, word_id, size)
+    print(''.join(reversed([id_word[int(i)] for i in question[0]])), '=', ''.join(id_word[int(i)] for i in answers))
     return 1 if answers == list(answer[:, 1:][0]) else 0
 
 
 class Train:
-    def __init__(self):
+    def __init__(self, model, optimizer):
         self.Tensorboard_logdir = None
         self.writer = None
         self.url = None
         self.browser = None
         self.tensorboard_process = None
+        self._model, self._optimizer = model, optimizer
 
-    def train(self, model, optimizer, train_questions, train_answer, test_questions, test_answer, batch_size, max_epoch,
+    def train(self, train_questions, train_answer, test_questions, test_answer, batch_size, max_epoch,
               word_id, id_word):
         max_iter = len(train_questions) // batch_size
         loss_cumulate = 0
@@ -1589,27 +1559,27 @@ class Train:
             for iters in range(max_iter):
                 batch_question = train_questions[iters * batch_size:(iters + 1) * batch_size]
                 batch_answer = train_answer[iters * batch_size:(iters + 1) * batch_size]
-                loss = model.forward(batch_question, batch_answer)
-                model.backward()
-                optimizer.update(model.weights, model.grads)
+                loss = self._model.forward(batch_question, batch_answer)
+                self._model.backward()
+                self._optimizer.update(self._model.weights, self._model.grads)
 
                 loss_cumulate += loss
 
                 if (iters + 1) % 10 == 0:
                     average_loss = loss_cumulate / 10
                     loss_cumulate = 0
-                    print_result(epoch + 1, max_epoch, iters + 1, max_iter, begin, average_loss, optimizer.lr)
+                    self.print_result(epoch + 1, max_epoch, iters + 1, max_iter, begin, average_loss, self._optimizer.lr)
             for i in range(len(test_questions)):
                 question, answer = test_questions[[i]], test_answer[[i]]
-                correct += evaluate(model, question, answer, word_id, size)
+                correct += evaluate(self._model, question, answer, word_id, id_word, size)
             if self.writer is not None:
                 self.writer.add_scalar("Correctness", correct / len(test_questions), epoch)
         if self.writer is not None and self.tensorboard_process is not None:
             self.writer.close()
             self.tensorboard_process.terminate()
 
-    def PYTORCH_train(self, model, optimizer, train_question, train_answers, test_question, test_answers, batch_size,
-                      max_epoch, word_id, log=True, log_dir=None, Tensorboard_reloadInterval=30, log_file_name=''):
+    def PYTORCH_train(self, train_question, train_answers, test_question, test_answers, batch_size,
+                      max_epoch, word_id, id_word, log=True, log_dir=None, Tensorboard_reloadInterval=30, log_file_name=''):
         max_iter = len(train_question) // batch_size
         loss_cumulate = 0
         begin = time.time()
@@ -1623,28 +1593,28 @@ class Train:
             for iters in range(max_iter):
                 batch_question = train_question[iters * batch_size:(iters + 1) * batch_size]
                 batch_answer = train_answers[iters * batch_size:(iters + 1) * batch_size]
-                optimizer.zero_grad()
-                loss = model.forward(batch_question, batch_answer)
+                self._optimizer.zero_grad()
+                loss = self._model.forward(batch_question, batch_answer)
                 loss.backward()
-                optimizer.step()
+                self._optimizer.step()
 
                 loss_cumulate += loss
 
                 if iters % 10 == 0:
                     average_loss = loss_cumulate / 10
                     loss_cumulate = 0
-                    print_result(epoch, max_epoch, iters, max_iter, begin, average_loss,
-                                 optimizer.param_groups[0]['lr'])
-            print_result(epoch, max_epoch, max_iter, max_iter, begin, average_loss,
-                         optimizer.param_groups[0]['lr'])
+                    self.print_result(epoch, max_epoch, iters, max_iter, begin, average_loss,
+                                      self._optimizer.param_groups[0]['lr'])
+            self.print_result(epoch, max_epoch, max_iter, max_iter, begin, average_loss,
+                              self._optimizer.param_groups[0]['lr'])
             for i in range(len(test_question)):
                 question, answer = test_question[[i]], test_answers[[i]]
-                correct += evaluate(model, question, answer, word_id, size)
+                correct += evaluate(self._model, question, answer, word_id, id_word, size)
             if self.writer is not None:
                 self.writer.add_scalar("Correctness", correct / len(test_question), epoch)
 
-        print_result(max_epoch, max_epoch, max_iter, max_iter, begin, average_loss,
-                     optimizer.param_groups[0]['lr'])
+        self.print_result(max_epoch, max_epoch, max_iter, max_iter, begin, average_loss,
+                          self._optimizer.param_groups[0]['lr'])
         if self.writer is not None and self.tensorboard_process is not None:
             self.writer.close()
             self.tensorboard_process.terminate()
@@ -1672,6 +1642,35 @@ class Train:
         tensorboard_port = 6006
         print('copy to run:', ''.join(['tensorboard', f' --logdir={log_dir}', f' --port={tensorboard_port}',
                                        f' --reload_interval={Tensorboard_reloadInterval}']))
+
+    @staticmethod
+    def print_result(current_epoch, total_epoch, current_iters, total_iters, begin, loss, lr, round=None):
+        blocks = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉']
+        list1 = list('│' + ' ' * 20 + '│')  # length 22 last_index: 21
+        list2 = list('│' + ' ' * 20 + '│')  # length 22 last_index: 21
+
+        # epoch index should be 1 <= index <= 20 (200 updates)
+        epoch_percentage = current_epoch * 100 / total_epoch
+        iter_percentage = current_iters * 100 / total_iters
+
+        epoch_index = min(int(epoch_percentage / 5), 20)
+        iter_index = min(int(iter_percentage / 5), 20)
+        epoch_fine = (int(epoch_percentage / 0.625) if epoch_percentage % 0.625 == 0 else math.floor(epoch_percentage / 0.625)) % 8
+        iter_fine = (int(iter_percentage / 0.625) if iter_percentage % 0.625 == 0 else math.floor(iter_percentage / 0.625)) % 8
+
+        list1[1:1 + epoch_index] = '█' * len(list1[1:1 + epoch_index])
+        list2[1:1 + iter_index] = '█' * len(list2[1:1 + iter_index])
+        if epoch_index < 20: list1[1+epoch_index] = blocks[epoch_fine]
+        if iter_index < 20: list2[1+iter_index] = blocks[iter_fine]
+        string1 = ''.join(list1)
+        string2 = ''.join(list2)
+
+        time1 = time.time() - begin
+        print(f'\rEpoch: {string1} {format(epoch_percentage, ".2f")}% |'
+              f' Iters: {string2} {format(iter_percentage, ".2f")}% | Time: {time1:.3f}s | loss: {loss:.3f} | lr: {lr:.3f}'
+              f' | current round: {round}',
+              end='',
+              flush=True)
 
 
 if __name__ == "__main__":
