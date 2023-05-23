@@ -23,13 +23,6 @@ class Transformer(Module):
 
     def forward(self, questions, answers):
         decoder_input, decoder_target = answers[:, :-1], answers[:, 1:]
-        # if self.offset is None:
-        #     offset = questions.size(1) - answers.size(1)
-        #     self.offset = offset
-        #     mask = self.get_mask(questions, decoder_input)
-        # else:
-        #     mask = self.get_mask(questions, decoder_input)
-        # mask = self.get_mask(questions, decoder_input)
         x = self.encoder(questions)
         new_sequence = self.decoder(decoder_input, x)
         score = self.linear(new_sequence)
@@ -39,32 +32,17 @@ class Transformer(Module):
     def generate(self, question, word_id, size):
         o2 = self.encoder.forward(question)
         sampled = []
-        sample_id = tensor(word_id['_'], device=device).reshape(1, 1)
+        sample_id = word_id['_']
+        sampled.append(sample_id)
         total_hidden = o2
         for _ in range(size):
-            x = sample_id.reshape((1, 1))
+            x = tensor(sampled, device=device).reshape((1, len(sampled)))
             new_sequence = self.decoder.forward(x, total_hidden)
             score = self.linear(new_sequence)
-            score = self.softmax(score)
-            sample_id = torch.argmax(score.flatten())
+            score = self.softmax(score)[:, -1, :]
+            sample_id = int(torch.argmax(score.flatten()))
             sampled.append(sample_id)
-        return sampled
-
-    def get_mask(self, questions, answers):
-        pad_index = self._pad_index
-        offset = self.offset
-        mask = None
-        if offset > 0:
-            answers = functional.pad(answers, (0, abs(offset)), value=pad_index)
-            mask = answers.eq(pad_index)
-        elif offset < 0:
-            questions = functional.pad(questions, (0, abs(offset)), value=pad_index)
-            mask = questions.eq(pad_index)
-        if mask is not None:
-            mask = mask.unsqueeze(-1)
-            mask = mask.expand(-1, -1, len(answers[:, :-1][-1]))
-            mask = torch.permute(mask.repeat(self.num_heads, 1, 1), (0, 2, 1))
-        return mask
+        return sampled[1:]
 
 
 class Encoder(Module):
@@ -114,17 +92,6 @@ class Decoder(Module):
         ff_result = self.feedForward.forward(o2)
         return self.layerNorm3.forward(ff_result + o2)
 
-    def generate(self, enc_hs, start_id, sample_size):
-        sampled = []
-        sample_id = start_id
-        total_hidden = enc_hs
-        for _ in range(sample_size):
-            x = sample_id.reshape((1, 1))
-            score = self.forward(x, total_hidden)
-            sample_id = torch.argmax(score.flatten())
-            sampled.append(sample_id)
-        return sampled
-
 
 class FeedForward(Module):
     def __init__(self, in_feature, out_feature, hidden_feature):
@@ -153,7 +120,7 @@ def positionalEncoding(x):  # x shape (batch, seq_len, embedding_dim)
 
 
 train_questions, test_questions, train_answer, test_answer, word_id, id_word = get_question_and_answer(
-    r"C:\Users\123\PycharmProjects\torch-models\data-set\symbolic computation\multiplication_shuffle.txt",
+    r"C:\Users\123\PycharmProjects\torch-models\data-set\symbolic computation\addition_shuffle2.txt",
     torch=True, train_ratio=0.96)
 _pad_index = -1
 _vocab_size = len(word_id)
@@ -161,7 +128,7 @@ _embedding_dim = 128
 _hidden_size = 516
 _num_head = 8
 _out_dim = 512
-max_epoch = 200
+max_epoch = 50
 batch = 10
 transformer = Transformer(_vocab_size, _embedding_dim, _hidden_size, _num_head, _pad_index)
 transformer.to(device)
@@ -169,5 +136,5 @@ transformer.train()
 optimizer = torch.optim.Adam(transformer.parameters())
 trainer = Train(transformer, optimizer)
 trainer.PYTORCH_train(train_questions, train_answer, test_questions, test_answer, batch,
-                      max_epoch, word_id, id_word, log_dir="division", log=False,
-                      log_file_name="Encoder1LSTM, Decoder1LSTM + 1Attention + affine")
+                      max_epoch, word_id, id_word, log_dir="runs", log=True,
+                      log_file_name="Transformer")
