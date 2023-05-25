@@ -1,7 +1,8 @@
 
 import torch
-from torch.nn import Module, MultiheadAttention, Linear, Embedding, Softmax, LayerNorm, ReLU, functional, CrossEntropyLoss
-from layers import get_question_and_answer, Train
+from torch.nn import Module, MultiheadAttention, Linear, Embedding, Softmax, LayerNorm, ReLU, functional,\
+    CrossEntropyLoss, ModuleList
+from layers import get_question_and_answer, Train, Preprocess
 from torch import tensor
 torch.random.manual_seed(42)
 torch.cuda.manual_seed_all(42)
@@ -10,10 +11,13 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
 class Transformer(Module):
-    def __init__(self, corpus, embedding_dim, hidden_size, num_head, _pad_index):
+    def __init__(self, corpus, embedding_dim, hidden_size, num_head, _pad_index, num_layers):
         super().__init__()
-        self.encoder = Encoder(corpus, embedding_dim, hidden_size, num_head)
-        self.decoder = Decoder(corpus, embedding_dim, hidden_size, num_head)
+        self.wordEmbedding1 = Embedding(corpus, embedding_dim)
+        self.encoder = ModuleList([Encoder(embedding_dim, hidden_size, num_head) for _ in range(num_layers)])
+
+        self.wordEmbedding2 = Embedding(corpus, embedding_dim)
+        self.decoder = ModuleList([Decoder(embedding_dim, hidden_size, num_head) for _ in range(num_layers)])
         self.linear = Linear(embedding_dim, corpus)
         self.softmax = Softmax(dim=2)
         self.loss = CrossEntropyLoss(ignore_index=_pad_index)
@@ -23,22 +27,42 @@ class Transformer(Module):
 
     def forward(self, questions, answers):
         decoder_input, decoder_target = answers[:, :-1], answers[:, 1:]
-        x = self.encoder(questions)
-        new_sequence = self.decoder(decoder_input, x)
-        score = self.linear(new_sequence)
+        word_vec = self.wordEmbedding1.forward(questions)
+        pe = positionalEncoding(word_vec)
+        encoder_output = word_vec + pe
+        for i in self.encoder:
+            encoder_output = i(encoder_output)
+
+        word_vec = self.wordEmbedding2.forward(decoder_input)
+        pe = positionalEncoding(word_vec)
+        word_vec = word_vec + pe
+        for i in self.decoder:
+            word_vec = i(decoder_input, word_vec, encoder_output)
+
+        score = self.linear(word_vec)
         loss = self.loss.forward(torch.permute(score, (0, 2, 1)), decoder_target)
         return loss
 
     def generate(self, question, word_id, size):
-        o2 = self.encoder.forward(question)
+        word_vec = self.wordEmbedding1.forward(question)
+        pe = positionalEncoding(word_vec)
+        encoder_output = word_vec + pe
+        for i in self.encoder:
+            encoder_output = i(encoder_output)
+
         sampled = []
         sample_id = word_id['_']
         sampled.append(sample_id)
-        total_hidden = o2
+        total_hidden = encoder_output
+
         for _ in range(size):
             x = tensor(sampled, device=device).reshape((1, len(sampled)))
-            new_sequence = self.decoder.forward(x, total_hidden)
-            score = self.linear(new_sequence)
+            word_vec = self.wordEmbedding2.forward(x)
+            pe = positionalEncoding(word_vec)
+            word_vec = word_vec + pe
+            for i in self.decoder:
+                word_vec = i(x, word_vec, total_hidden)
+            score = self.linear(word_vec)
             score = self.softmax(score)[:, -1, :]
             sample_id = int(torch.argmax(score.flatten()))
             sampled.append(sample_id)
@@ -46,18 +70,15 @@ class Transformer(Module):
 
 
 class Encoder(Module):
-    def __init__(self, corpus, embedding_dim, hidden_size, num_head):
+    def __init__(self, embedding_dim, hidden_size, num_head):
         super().__init__()
-        self.wordEmbedding = Embedding(corpus, embedding_dim)
         self.multiHeadAttention = MultiheadAttention(embedding_dim, num_heads=num_head, batch_first=True)
         self.layerNorm = LayerNorm(embedding_dim)
         self.feedForward = FeedForward(embedding_dim, embedding_dim, hidden_size)
         self.layerNorm2 = LayerNorm(embedding_dim)
+        self.stack = ModuleList()
 
-    def forward(self, x):
-        word_vec = self.wordEmbedding.forward(x)
-        pe = positionalEncoding(word_vec)
-        word_vec = word_vec + pe
+    def forward(self, word_vec):
         x, weights = self.multiHeadAttention(word_vec, word_vec, word_vec)
         o = self.layerNorm.forward(x + word_vec)
         ff_result = self.feedForward.forward(o)
@@ -66,9 +87,8 @@ class Encoder(Module):
 
 
 class Decoder(Module):
-    def __init__(self, corpus, embedding_dim, hidden_size, num_head):
+    def __init__(self, embedding_dim, hidden_size, num_head):
         super().__init__()
-        self.wordEmbedding = Embedding(corpus, embedding_dim)
         self.maskedMultiHeadAttention = MultiheadAttention(embedding_dim, num_head, batch_first=True)
         self.layerNorm = LayerNorm(embedding_dim)
         self.multiHeadAttention = MultiheadAttention(embedding_dim, num_head, batch_first=True)
@@ -77,10 +97,7 @@ class Decoder(Module):
         self.layerNorm3 = LayerNorm(embedding_dim)
         self.num_heads = num_head
 
-    def forward(self, answer, o2):
-        word_vec = self.wordEmbedding.forward(answer)
-        pe = positionalEncoding(word_vec)
-        word_vec = word_vec + pe
+    def forward(self, answer, word_vec, o2):
         mask2 = torch.triu(torch.ones(word_vec.shape[0]*self.num_heads, len(answer[-1]), len(answer[-1]), device=device), diagonal=1).bool()
         mask = mask2
         # when doing query @ key, result is in shape (batch, seq_len, seq_len)
@@ -119,6 +136,9 @@ def positionalEncoding(x):  # x shape (batch, seq_len, embedding_dim)
     return pos
 
 
+# with open("data-set/corpus/ptb.train.txt") as fp:
+#     string = fp.readlines()
+# preprocess = Preprocess(string, ' ', '.')
 train_questions, test_questions, train_answer, test_answer, word_id, id_word = get_question_and_answer(
     r"C:\Users\123\PycharmProjects\torch-models\data-set\symbolic computation\addition_shuffle2.txt",
     torch=True, train_ratio=0.96)
@@ -130,7 +150,8 @@ _num_head = 8
 _out_dim = 512
 max_epoch = 50
 batch = 10
-transformer = Transformer(_vocab_size, _embedding_dim, _hidden_size, _num_head, _pad_index)
+_num_layers = 2
+transformer = Transformer(_vocab_size, _embedding_dim, _hidden_size, _num_head, _pad_index, _num_layers)
 transformer.to(device)
 transformer.train()
 optimizer = torch.optim.Adam(transformer.parameters())
