@@ -1,7 +1,6 @@
 
 import torch
-from torch.nn import Module, MultiheadAttention, Linear, Embedding, Softmax, LayerNorm, ReLU, functional,\
-    CrossEntropyLoss, ModuleList
+from torch.nn import Module, MultiheadAttention, Linear, Embedding, Softmax, LayerNorm, ReLU, CrossEntropyLoss, ModuleList
 from layers import get_question_and_answer, Train, Preprocess
 from torch import tensor
 torch.random.manual_seed(42)
@@ -76,7 +75,6 @@ class Encoder(Module):
         self.layerNorm = LayerNorm(embedding_dim)
         self.feedForward = FeedForward(embedding_dim, embedding_dim, hidden_size)
         self.layerNorm2 = LayerNorm(embedding_dim)
-        self.stack = ModuleList()
 
     def forward(self, word_vec):
         x, weights = self.multiHeadAttention(word_vec, word_vec, word_vec)
