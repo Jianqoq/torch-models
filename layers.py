@@ -1,5 +1,6 @@
 import math
 import os
+import sys
 
 import ad
 import time
@@ -9,6 +10,7 @@ from sklearn.base import BaseEstimator
 from torch import tensor
 from torch.utils.tensorboard import SummaryWriter
 import torch
+
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 np.random.seed(42)
 
@@ -228,10 +230,12 @@ class TimeRNN:
         self.dh = dh
         return dxs
 
+
 class SoftmaxWithLoss:
     """
     general SoftmaxWithLoss
     """
+
     def __init__(self):
         self.x, self.y = None, None
 
@@ -358,22 +362,18 @@ class Preprocess:
         self.text = text.split(split_way)
 
     @staticmethod
-    def get_word_id(text=None):
+    def get_word_id(text):
+        """has to be unique for each element"""
         word_id = {}
         id_word = {}
         corpus = []
         append = corpus.append
-        counter = 0
-        repeated = []
+        counter = 3
         for index, i in enumerate(text):
-            if i not in word_id:
-                word_id[i] = counter
-                id_word[counter] = i
-                counter += 1
-                append(word_id[i])
-            else:
-                append(word_id[i])
-                repeated.append(index)
+            word_id[i] = counter
+            id_word[counter] = i
+            counter += 1
+            append(word_id[i])
         return word_id, id_word, corpus
 
     def get_single_context(self, id_word: dict, word_id: dict, corpus: list, word: str,
@@ -1568,7 +1568,8 @@ class Train:
                 if (iters + 1) % 10 == 0:
                     average_loss = loss_cumulate / 10
                     loss_cumulate = 0
-                    self.print_result(epoch + 1, max_epoch, iters + 1, max_iter, begin, average_loss, self._optimizer.lr)
+                    self.print_result(epoch + 1, max_epoch, iters + 1, max_iter, begin, average_loss,
+                                      self._optimizer.lr)
             for i in range(len(test_questions)):
                 question, answer = test_questions[[i]], test_answer[[i]]
                 correct += evaluate(self._model, question, answer, word_id, id_word, size)
@@ -1579,7 +1580,8 @@ class Train:
             self.tensorboard_process.terminate()
 
     def PYTORCH_train(self, train_question, train_answers, test_question, test_answers, batch_size,
-                      max_epoch, word_id, id_word, log=True, log_dir=None, Tensorboard_reloadInterval=30, log_file_name=''):
+                      max_epoch, word_id, id_word, log=True, log_dir=None, Tensorboard_reloadInterval=30,
+                      log_file_name=''):
         max_iter = len(train_question) // batch_size
         loss_cumulate = 0
         begin = time.time()
@@ -1635,7 +1637,6 @@ class Train:
         writer.flush()
         self.open_Tensorboard(log_dir, Tensorboard_reloadInterval)
 
-
     @staticmethod
     def open_Tensorboard(log_dir=None, Tensorboard_reloadInterval=30):
         log_dir = rf'{os.getcwd()}\runs' if log_dir is None else log_dir
@@ -1655,13 +1656,15 @@ class Train:
 
         epoch_index = min(int(epoch_percentage / 5), 20)
         iter_index = min(int(iter_percentage / 5), 20)
-        epoch_fine = (int(epoch_percentage / 0.625) if epoch_percentage % 0.625 == 0 else math.floor(epoch_percentage / 0.625)) % 8
-        iter_fine = (int(iter_percentage / 0.625) if iter_percentage % 0.625 == 0 else math.floor(iter_percentage / 0.625)) % 8
+        epoch_fine = (int(epoch_percentage / 0.625) if epoch_percentage % 0.625 == 0 else math.floor(
+            epoch_percentage / 0.625)) % 8
+        iter_fine = (int(iter_percentage / 0.625) if iter_percentage % 0.625 == 0 else math.floor(
+            iter_percentage / 0.625)) % 8
 
         list1[1:1 + epoch_index] = '█' * len(list1[1:1 + epoch_index])
         list2[1:1 + iter_index] = '█' * len(list2[1:1 + iter_index])
-        if epoch_index < 20: list1[1+epoch_index] = blocks[epoch_fine]
-        if iter_index < 20: list2[1+iter_index] = blocks[iter_fine]
+        if epoch_index < 20: list1[1 + epoch_index] = blocks[epoch_fine]
+        if iter_index < 20: list2[1 + iter_index] = blocks[iter_fine]
         string1 = ''.join(list1)
         string2 = ''.join(list2)
 
@@ -1671,6 +1674,61 @@ class Train:
               f' | current round: {round}',
               end='',
               flush=True)
+
+
+class printProcess:
+    def __init__(self):
+        self.ls = []
+        self.metrics = []
+        self.percentage = None
+
+    def print_result(self, *args, begin=None, timing=True):
+        """ format: (current, total), metrics"""
+        ls = self.ls
+        blocks = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉']
+        percentage = []
+        # epoch index should be 1 <= index <= 20 (200 updates)
+        count = 0
+        for i in args:
+            if isinstance(i, tuple):
+                percentage.append(i[0] * 100 / i[1])
+                count += 1
+        assert count == len(ls), "bar not match the arguments input"
+        index = [min(int(percent / 5), 20) for percent in percentage]
+
+        fine = [(int(percent / 0.625) if percent % 0.625 == 0 else math.floor(percent / 0.625)) % 8 for percent in
+                percentage]
+
+        for idx, (title, bar) in enumerate(ls):
+            bar[1:1 + index[idx]] = '█' * len(bar[1:1 + index[idx]])
+            if index[idx] < 20:
+                bar[1 + index[idx]] = blocks[fine[idx]]
+
+        string = "\r"
+        for idx, (title, bar) in enumerate(ls):
+            string += f" ▏{title}: {''.join(bar)} {format(percentage[idx], '.2f')}%"
+
+        string2 = ""
+
+        if begin is not None and timing:
+            string2 += f" ▏Time: {format(time.time() - begin, '.2f')} s"
+        for idx, (title, unit) in enumerate(self.metrics):
+            string2 += f" ▏{title}: {args[count + idx]} {unit if unit is not None else ''}"
+
+        print(string + string2, end='', flush=True)
+
+    def add_bar(self, *title):
+        for i in title:
+            self.ls.append((i, list('│' + ' ' * 20 + '│')))
+
+    def add_metrics(self, *metrics):
+        for i in metrics:
+            if isinstance(i, str):
+                i = (i, None)
+            if len(i) == 1:
+                self.metrics.append((i[0], None))
+            else:
+                self.metrics.append(i)
 
 
 if __name__ == "__main__":
