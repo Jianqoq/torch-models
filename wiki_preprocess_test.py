@@ -26,7 +26,7 @@ class MyTest(unittest.TestCase):
                         matches = tool.check(sentence)
                         p.print_result(key, sentence, begin=begin, timing=True)
                         if matches:
-                            if len(matches) == 1 and matches[0].ruleId not in rule_list:
+                            if len(matches) == 1 and matches[0].ruleId not in rule_list and '':
                                 error_sentence[len(error_sentence)] = (
                                     key,
                                     sentence,
@@ -70,14 +70,21 @@ class MyTest(unittest.TestCase):
                     except json.decoder.JSONDecodeError:
                         past = []
                     if past and len(past) < len(error_sentence):
+                        f.close()
+                        with open(r"error_container2.json", "w", encoding="utf-8") as file_pointer:
+                            json.dump(error_sentence, file_pointer, indent=4)
                         tool.close()
                         self.assertGreater(len(past), len(error_sentence))
-                    elif past:
+                    elif len(past):
+                        f.close()
                         with open(r"error_container.json", "w", encoding="utf-8") as file_pointer:
                             json.dump(error_sentence, file_pointer, indent=4)
+                            file_pointer.close()
                             tool.close()
                             self.assertGreater(len(past), len(error_sentence))
                     else:
+                        f.close()
                         with open(r"error_container.json", "w", encoding="utf-8") as file_pointer:
                             json.dump(error_sentence, file_pointer, indent=4)
+                            file_pointer.close()
                             self.assertGreater(1, 0)

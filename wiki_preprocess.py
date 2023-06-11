@@ -1,37 +1,126 @@
-import sys
-import unittest
-
 import ijson
-import language_tool_python
 from ijson.common import ObjectBuilder
 import re
 import time
-from langdetect import detect
-from language_tool_python import LanguageTool
 from layers import printProcess
-import nltk
 import multiprocessing as mp
 import json
 from layers import Preprocess
 from blingfire import *
 
 
-def replace_periods(match):
+def to_lower(match):
     s = match.group()
+    s = re.sub(r"\s+(\"\s+)\w", lambda m: f"{m.group(1).replace(' ', '')}", s)
+    s = re.sub(r"\w(\s+\")\s+", lambda m: f"{m.group(1).replace(' ', '')}", s)
     return s.lower()
 
 
-def replace_periods_back(match):
+def replace_periods_parentheses_back(match, origin, lower):
     s = match.group()
-    s = re.sub(r"\"\s*([a-z])(.*?[.|?])", lambda m: f"\"{m.group(1).upper()}{m.group(2)}", s)
-    s = re.sub(r"(\.)\s*(\w)", lambda m: f"{m.group(1)} {m.group(2).upper()}", s)
+    if '[period]' in s:
+        index = lower.index(s)
+        s = origin[index]
     return s
+
+
+def replace_periods_back(text: str, symbol):
+    replaced = re.sub(fr"([.?!])\s+{symbol}[^.?!\w]*([a-z])(.*?[.?!])",
+                      lambda m: f"{m.group(1)} \"{m.group(2).upper()}{m.group(3)}",
+                      text)
+    text = re.sub(r"([.!?])\s*(\w)", lambda m: f"{m.group(1)} {m.group(2).upper()}", replaced)
+    return text
+
+
+def remove_nested(s, symbol1, symbol2):
+    match = re.finditer(r'\[\[File:', s)
+    result = [i.start() for i in match]
+    match_strings = []
+    if result:
+        for m in result:
+            stack = []
+            current = s[m:]
+            i = 0
+            FLAG = False
+            while i < len(current):
+                if current[i:i+len(symbol1)] == symbol1:
+                    stack.append(symbol1)
+                    i += 2
+                elif current[i:i+len(symbol2)] == symbol2:
+                    i += 2
+                    stack.pop()
+                    if not stack:
+                        FLAG = True
+                        break
+                else:
+                    i += 1
+            if FLAG:
+                match_strings.append(s[m:m + i])
+    if len(match_strings) == 1:
+        s = s.replace(match_strings[0], "")
+    else:
+        for i in match_strings:
+            s = s.replace(i, "")
+    return s
+
+
+def find_nested(s, to_find, symbol1, symbol2):
+    match = re.finditer(to_find, s)
+    result = [i.start() for i in match]
+    match_strings = []
+    if result and symbol1 != symbol2:
+        for m in result:
+            stack = []
+            current = s[m:]
+            i = 0
+            FLAG = False
+            while i < len(current):
+                if current[i:i+len(symbol1)] == symbol1:
+                    stack.append(symbol1)
+                    i += len(symbol1)
+                elif current[i:i+len(symbol2)] == symbol2:
+                    i += len(symbol2)
+                    stack.pop()
+                    if not stack:
+                        FLAG = True
+                        break
+                else:
+                    i += 1
+            if FLAG:
+                match_strings.append(s[m:m + i])
+    elif result and symbol1 == symbol2:
+        for m in result:
+            stack = []
+            current = s[m:]
+            i = 0
+            FLAG = False
+            while i < len(current):
+                if current[i:i+len(symbol1)] == symbol1:
+                    stack.append(symbol1)
+                    i += len(symbol1)
+                elif current[i:i+len(symbol2)] == symbol2:
+                    i += len(symbol2)
+                    stack.pop()
+                    if not stack:
+                        FLAG = True
+                        break
+                else:
+                    i += 1
+            if FLAG:
+                match_strings.append(s[m:m + i])
+    return match_strings
 
 
 def strip(match):
     s = match.group()
     s = re.sub(r"\n", " ", s)
     s = re.sub(r" {2,}", " ", s)
+    return s
+
+
+def strip_quote(match):
+    s = match.group()
+    s = re.sub(r"\" +| +\"", "\"", s)
     return s
 
 
@@ -61,7 +150,6 @@ def search(file, words):
 
 
 def clean_data(to_write, path, pattern_list):
-    match_pattern = re.compile(r"\"(.*?)\"")
     all_words = set([])
     text_list2 = []
     dictionary = {}
@@ -70,11 +158,23 @@ def clean_data(to_write, path, pattern_list):
         try:
             with open(path, 'r', encoding='utf-8') as fp:
                 texts = fp.read()
+                texts = remove_nested(texts, "[[", "]]")
             for pattern, replace in pattern_list:
                 texts = re.sub(pattern, replace, texts)
+            origin = find_nested(texts, r'\(', '(', ')')
+            lower = []
+            cache = None
+            for i in origin:
+                if '.' in i:
+                    cache = i.lower().replace('.', '[period]')
+                    texts = texts.replace(i, cache)
+                if cache is not None:
+                    lower.append(cache)
+                else:
+                    lower.append(i)
+                cache = None
             text_list = texts.split(r"</doc>")
-            period = to_raw_string('.')
-            further_clean = [sentence.strip() for sentence in text_list if period in sentence]
+            further_clean = [article.strip() for article in text_list if '.' in article]
             del text_list, texts
             for article in further_clean:
                 count += 1
@@ -85,16 +185,26 @@ def clean_data(to_write, path, pattern_list):
                     for idx, sentence in enumerate(copy):
                         words = text_to_words(sentence.lower().replace('-', ' - ')).split(" ")
                         copy[idx] = words
-                        copy2[idx] = re.sub(match_pattern, replace_periods_back, copy2[idx])
+                        if '[period]' in copy2[idx]:
+                            match = find_nested(copy2[idx], r'\(', '(', ')')
+                            for i in match:
+                                if i in lower:
+                                    index = lower.index(i)
+                                    copy2[idx] = copy2[idx].replace(i, origin[index])
+                        if '\"' in copy2[idx]:
+                            copy2[idx] = replace_periods_back(copy2[idx], r'\"')
+                        if '\'' in copy2[idx]:
+                            copy2[idx] = replace_periods_back(copy2[idx], r'\'')
+                        copy2[idx] = copy2[idx].replace(' i ', ' I ').replace('i. E.', 'i.e.')
                         for word in words:
                             all_words.add(word)
+
                     dictionary[f"{path}_article_{count}"] = copy2
                     text_list2.append(copy)
                     del copy, copy2
             f.write(json.dumps({"words": text_list2}, indent=4))
         except Exception as e:
             print(e)
-            pass
     with open(f"{to_write}_sentence.json", 'w', encoding='utf-8') as f:
         f.write(json.dumps(dictionary, indent=4))
 
@@ -124,6 +234,11 @@ def get_texts(text):
     return texts
 
 
+def strip_space(match):
+    sub = re.sub(r'\s+', '', match.group(1))
+    return f"{sub} "
+
+
 def get_train(path, cores=None, pattern_list=None):
     p = printProcess()
     p.add_metrics("article")
@@ -134,28 +249,40 @@ def get_train(path, cores=None, pattern_list=None):
     articles = 0
     begin = time.time()
     # char_list = [f"{chr(i)}{chr(j)}" for i in range(65, 91) for j in range(65, 91)]
-    char_list = ["AA", "AB"]
+    char_list = ["AA"]
     # convert a list of sentence to a list of word token list
     pattern_list = [
-        (re.compile(r"(\n)[\w\s\/-]*(\n)+"), "\n"),  # remove title
+        (re.compile(r"(\n)[\w\s/-]*(\n)+"), "\n"),  # remove title
         (re.compile(r"<doc.*?>\n</doc>\n"), ""),  # remove useless article
         (re.compile(r"<doc.*?>\n"), ""),  # remove useless article
-        (re.compile(r"(\n)[\w\s\\]*(\n)"), "\nParagraph\n"),  # remove title
         (re.compile(r"&lt;.*?&gt;(\n)"), ""),  # remove &lt;...&gt;
         (re.compile(r"&lt;.*?&gt;"), " "),  # remove &lt;...&gt;
-        (re.compile(r"\([^\w\"\'\)\]]+"), r"( "),  # change ( ; ...) to (...)
+        (re.compile(r"[^\w)\]\"\'(\[]+([;,.?!])"), r"\g<1>"),  # hello:, ; to hello;
+        (re.compile(r"\([^\w\"\')\]\[]+"), r"("),  # change ( ; ...) to (...)
+        (re.compile(r"\{[^\w\"\')\]\[]+"), r"{"),  # change ( ; ...) to (...)
         (re.compile(r"\(\s*\)"), " "),  # remove (  ) only have space inside
         (re.compile(r"\xa0"), " "),  # change \\n\\n+ to \\n\\n
-        (re.compile(r"\[\["), r" "),  # extract content from [[content]]
-        (re.compile(r"\]\]"), r" "),  # extract content from [[content]]
-        (re.compile(r"\["), r" "),  # extract content from [content]
-        (re.compile(r"\]"), r" "),  # extract content from [content]
+        (re.compile(r"\"\[\["), "\""),  # extract content from [[content]]
+        (re.compile(r"]]\""), "\""),  # extract content from [[content]]
+        (re.compile(r"\[\["), " "),  # extract content from [[content]]
+        (re.compile(r"]]"), " "),  # extract content from [[content]]
+        (re.compile(r"\"\["), "\""),  # extract content from [content]
+        (re.compile(r"]\""), "\""),  # extract content from [content]
+        (re.compile(r"\["), " "),  # extract content from [content]
+        (re.compile(r"]"), " "),  # extract content from [content]
         (re.compile(r"\(\'\'\)"), " "),  # remove ('')
+        (re.compile(r"\(\"\"\)"), " "),  # remove ("")
+        (re.compile(r"\(\'\)"), " "),  # remove (')
         (re.compile(r"(\n\n)+"), "\n\n"),  # change multiple \\n to one \\n
         (re.compile(r"(\\u[0-9a-fA-F]{4}|\\x[a-fA-F0-9]{2})"), r" \1 "),  # change "unicode" to " unicode "
-        (re.compile(r"\u2013"), "-"),
-        (re.compile(r"\"(.*?)\""), replace_periods),
+        (re.compile(r"\u2013"), "-"),  # from \u2013 to -
+        (re.compile(r"\"(.*?)\""), to_lower),  # make everything inside "" lower
+        (re.compile(r"\s+(\'[^.?!\w]*([a-zA-Z]){2,}.*?[!?.]\')"), to_lower),  # make everything inside '' lower
         (re.compile(r"\( +"), r"("),  # change multiple space to one (  123)
+        (re.compile(r"\{ +"), r"{"),  # change multiple space to one (  123)
+        (re.compile(r"([^\s\w\"\'.?!%)\]]\s*)+([])}])"), r"\g<2>"),  # (: ) -> ()
+        (re.compile(r"\s+?([?:,.])\s+?"), r"\1 "),  # strip space around ? : , .
+        (re.compile(r"\s+([]|)])"), r"\1"),  # (hello ) -> (hello)
         (re.compile(r" {2,}"), " "),  # change multiple space to one
         (re.compile(r"[A-Z][^!?]*[.!?]\s"), strip),
     ] if pattern_list is None else pattern_list
@@ -197,62 +324,6 @@ def get_train(path, cores=None, pattern_list=None):
         fp.write(json.dumps({"corpus": corpus}, indent=4))
 
     return word_id, id_word
-
-
-def get_single_train(file_path):
-    element = file_path.split("\\")
-    all_words = set([])
-    text_list2 = []
-    chars = element[-2]
-    i = element[-1]
-    art = []
-    # convert a list of sentence to a list of word token list
-    os.makedirs(rf"single_words\{chars}", exist_ok=True)
-    with open(rf"single_words\{chars}\wiki_{i:02}.json", 'w') as f:
-        with open(file_path, 'r', encoding='utf-8') as fp:
-            # Iterate over the dump file line by line
-            original_article = fp.read()
-            texts = re.sub(r"&lt;.*?&gt;", " ", original_article)
-            texts = re.sub(r"\(\s*\)", " ", texts)
-            texts = re.sub(r"\xa0", " ", to_raw_string(texts))
-            texts = re.sub(r"\n\n+", "\n\n", texts)
-            texts = re.sub(r".*?\('\).*?", " ", texts)  # (')
-            texts = re.sub(r"(\(|\[)\W+\s*", r" \g<1> ", texts)  # , ; or ( ; ...)
-            texts = re.sub(r"(\\u\d+)", r" \1 ", to_raw_string(texts))  # unicode
-        text = texts.lower()
-        text_list = texts.split("</doc>")
-        for article in text_list:
-            texts = re.sub(r'<doc.*?>', ' ', article)
-            # texts = re.sub(r'(\n+\w*\n+)', '', texts)
-            if texts != "":
-                texts = text_to_sentences(texts)
-                art.append(texts)
-                texts = texts.split("\n")
-                for idx, sentence in enumerate(texts):
-                    words = text_to_words(sentence).split(" ")
-                    texts[idx] = words
-                    for word in words:
-                        if word not in original_article:
-                            raise RuntimeError
-                        all_words.add(word)
-                text_list2.append(texts)
-        f.write(json.dumps({"words": text_list2}))
-    word_id, id_word, corpus = Preprocess.get_word_id(all_words)
-    word_id["[CLS]"] = 1
-    id_word[1] = "[CLS]"
-    word_id["[PAD]"] = 0
-    id_word[0] = "[PAD]"
-    word_id["[MASK]"] = 3
-    id_word[3] = "[MASK]"
-
-    with open("test_saved_word_id.json", "w", encoding="utf-8") as fp:
-        fp.write(json.dumps(word_id, indent=4))
-    with open("test_re_result.txt", "w", encoding="utf-8") as fp:
-        fp.write(text)
-    with open("test_text_to_sentence.txt", "w", encoding="utf-8") as fp:
-        fp.write(str(art))
-    with open("test_saved_corpus2.json", "w", encoding="utf-8") as fp:
-        fp.write(json.dumps({"corpus": corpus}, indent=4))
 
 
 def search_word(path, words, char_list=None, cores=None, save_result=False):
@@ -310,37 +381,43 @@ def parse_json(file):
 
 
 if __name__ == "__main__":
-    patternlist = [
-        (re.compile(r"(\n)[\w\s\/-]*(\n)+"), "\n"),  # remove title
+    pattern_list = [
+        (re.compile(r"(\n)[\w\s/-]*(\n)+"), "\n"),  # remove title
         (re.compile(r"<doc.*?>\n</doc>\n"), ""),  # remove useless article
         (re.compile(r"<doc.*?>\n"), ""),  # remove useless article
-        (re.compile(r"(\n)[\w\s\\]*(\n)"), "\nParagraph\n"),  # remove title
         (re.compile(r"&lt;.*?&gt;(\n)"), ""),  # remove &lt;...&gt;
         (re.compile(r"&lt;.*?&gt;"), " "),  # remove &lt;...&gt;
-        (re.compile(r"\([^\w\"\'\)\]]+"), r"( "),  # change ( ; ...) to (...)
+        (re.compile(r"[^\w)\]\"\'(\[]+([;,.?!])"), r"\g<1>"),  # hello:, ; to hello;
+        (re.compile(r"\([^\w\"\')\]\[]+"), r"("),  # change ( ; ...) to (...)
+        (re.compile(r"\{[^\w\"\')\]\[]+"), r"{"),  # change ( ; ...) to (...)
         (re.compile(r"\(\s*\)"), " "),  # remove (  ) only have space inside
         (re.compile(r"\xa0"), " "),  # change \\n\\n+ to \\n\\n
-        (re.compile(r"\[\["), r" "),  # extract content from [[content]]
-        (re.compile(r"\]\]"), r" "),  # extract content from [[content]]
-        (re.compile(r"\["), r" "),  # extract content from [content]
-        (re.compile(r"\]"), r" "),  # extract content from [content]
+        (re.compile(r"\"\[\["), "\""),  # extract content from [[content]]
+        (re.compile(r"]]\""), "\""),  # extract content from [[content]]
+        (re.compile(r"\[\["), " "),  # extract content from [[content]]
+        (re.compile(r"]]"), " "),  # extract content from [[content]]
+        (re.compile(r"\"\["), "\""),  # extract content from [content]
+        (re.compile(r"]\""), "\""),  # extract content from [content]
+        (re.compile(r"\["), " "),  # extract content from [content]
+        (re.compile(r"]"), " "),  # extract content from [content]
         (re.compile(r"\(\'\'\)"), " "),  # remove ('')
+        (re.compile(r"\(\"\"\)"), " "),  # remove ("")
+        (re.compile(r"\(\'\)"), " "),  # remove (')
         (re.compile(r"(\n\n)+"), "\n\n"),  # change multiple \\n to one \\n
-        # (re.compile(r"\(.*?(u[0-9a-fA-F]{4}|x[a-fA-F0-9]{2}).*?\)"), " "),    # remove (... unicode ...)
         (re.compile(r"(\\u[0-9a-fA-F]{4}|\\x[a-fA-F0-9]{2})"), r" \1 "),  # change "unicode" to " unicode "
-        (re.compile(r"\u2013"), "-"),
-        (re.compile(r"\"(.*?)\""), replace_periods),
+        (re.compile(r"\u2013"), "-"),  # from \u2013 to -
+        (re.compile(r"\"(.*?)\""), to_lower),  # make everything inside "" lower
+        (re.compile(r"\s+(\'[^.?!\w]*([a-zA-Z]){2,}.*?[!?.]\')"), to_lower),  # make everything inside '' lower
         (re.compile(r"\( +"), r"("),  # change multiple space to one (  123)
+        (re.compile(r"\{ +"), r"{"),  # change multiple space to one (  123)
+        (re.compile(r"([^\s\w\"\'.?!%)\]]\s*)+([])}])"), r"\g<2>"),  # (: ) -> ()
+        (re.compile(r"\s+?([?:,.])\s+?"), r"\1 "),  # strip space around ? : , .
+        (re.compile(r"\s+([]|)}])"), r"\1"),  # (hello ) -> (hello)
         (re.compile(r" {2,}"), " "),  # change multiple space to one
+        (re.compile(r"[A-Z][^!?]*[.!?]\s"), strip),
     ]
-    #
-    # texts = r"According to mother tongue percentage statistics by the Andorran Government released in 2018 :\\nMother tongue &lt;templatestyles src=\"Legend/styles.css\" /&gt;   Spanish \\n (43.2%)&lt;templatestyles src=\"Legend/styles.css\" /&gt;   Catalan \\n (35.7%)&lt;templatestyles src=\"Legend/styles.css\" /&gt;  Portuguese \\n (17.1%)&lt;templatestyles src=\"Legend/styles.css\" /&gt;   French\n (8.9%)&lt;templatestyles src=\"Legend/styles.css\" /&gt;  other (5%)\nThe historic and official language is Catalan, a Romance language. The Andorran government encourages the use of Catalan. It funds a Commission for Catalan Toponymy in Andorra (Catalan: ), and provides free Catalan classes to assist immigrants. Andorran television and radio stations use Catalan."
-    # for pattern, replace in patternlist:
-    #     texts = re.sub(pattern, replace, texts)
-    # print(texts)
-    # _word_id, _id_word = get_train(r"C:\Users\123\PycharmProjects\results", 16)
-    # text = "Renewed interest in antiquity during ] the Renaissance and in private judgment during the Reformation restored elements of anti - authoritarian secularism, particularly in France."
-
-    # matches = tool.check(text)
-    # for mistake in matches:
-    #     print(f"Mistake found: {mistake}, Suggested correction: ")
+    _word_id, _id_word = get_train(r"C:\Users\123\PycharmProjects\results", 16)
+    # t = 'The name "Apollo"—unlike the related older name "Paean"—is generally not found in the Linear B (Mycenean Greek) texts, although there is a possible attestation in the lacunose form "]pe-rjo-[" (Linear B: ]-[) on the KN E 842 tablet, though it has also been suggested that the name might actually read "Hyperion" ([u]-pe-rjo-[ne]).'
+    # for i, replace in pattern_list:
+    #     t = re.sub(i, replace, t)
+    # print(t)
