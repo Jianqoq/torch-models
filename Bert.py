@@ -1,20 +1,11 @@
-import ijson
-from ijson.common import ObjectBuilder
-import re
-import time
+import json
+import sys
+
 import torch
-from langdetect import detect
 from torch.nn import Module, MultiheadAttention, Linear, Embedding, LayerNorm, ReLU, \
     ModuleList
-from language_tool_python import LanguageTool
-from layers import printProcess
-import nltk
-import multiprocessing as mp
-import json
-import mwparserfromhell
-import xml.etree.ElementTree as ET
-from layers import Preprocess
-from blingfire import *
+
+from layers import Train
 
 torch.random.manual_seed(42)
 torch.cuda.manual_seed_all(42)
@@ -28,27 +19,31 @@ class Bert(Module):
         self.tokenEmbedding = Embedding(corpus, embedding_dim)
         self.segmentEmbedding = Embedding(n_segments, embedding_dim)
         self.position_embedding = Embedding(max_length, embedding_dim)
-        self.encoder = ModuleList([Encoder(embedding_dim, hidden_size, num_head) for _ in range(num_layers)])
+        self.encoder = Encoder(embedding_dim, hidden_size, num_head)
+        self.linear = Linear(_embedding_dim, corpus)
+        self.loss_fn = torch.nn.CrossEntropyLoss(ignore_index=0)
         self.num_heads = num_head
-        self.seq_len = 512
 
     def forward(self, questions, word_id, mask0, prob):
-        segments = torch.ones(questions.shape, dtype=torch.int, device=device) * mask0
-        prob_mask = torch.bernoulli(torch.full(mask0.shape, prob, device=device) * mask0).long()
+        questions = questions.long()
+        segments = torch.ones(questions.shape, dtype=torch.long, device=device) * mask0  # mask0 non pad mask
+        prob_mask = torch.bernoulli(torch.full(mask0.shape, prob, device=device) * mask0).bool()
         not_prob_mask = torch.logical_not(prob_mask)
         mask_word_mask = prob_mask * word_id["[MASK]"]
-        questions = not_prob_mask * questions + mask_word_mask
-        positions = torch.arange(questions[0].shape[0], device=device).unsqueeze(0).repeat(questions.shape[0],
-                                                                                           1) * mask0
-        mask = (mask0 != False).unsqueeze(1).repeat(self.num_heads, self.seq_len, 1)
+        questions_processed = not_prob_mask * questions + mask_word_mask
+        positions = torch.arange(questions_processed[0].shape[0], device=device).unsqueeze(0).repeat(questions_processed.shape[0], 1) * mask0
+        mask = (mask0 == True).unsqueeze(1).repeat(self.num_heads, questions_processed.shape[1], 1)
 
-        word_vec = self.tokenEmbedding.forward(questions.long())
+        word_vec = self.tokenEmbedding.forward(questions_processed.long())
         segment = self.segmentEmbedding.forward(segments)
         position = self.position_embedding.forward(positions)
         inp = word_vec + segment + position
-        for i in self.encoder:
-            inp = i.forward(inp, mask)
-        return inp
+        inp = self.encoder.forward(inp, mask)
+        linear = self.linear.forward(inp)
+        after = torch.permute(linear, (0, 2, 1))
+        # result = prob_mask * questions
+        loss = self.loss_fn.forward(after, questions)
+        return loss
 
 
 class Encoder(Module):
@@ -60,7 +55,7 @@ class Encoder(Module):
         self.layerNorm2 = LayerNorm(embedding_dim)
 
     def forward(self, word_vec, mask):
-        x, weights = self.multiHeadAttention(word_vec, word_vec, word_vec, attn_mask=mask)
+        x, weights = self.multiHeadAttention.forward(word_vec, word_vec, word_vec, attn_mask=mask)
         o = self.layerNorm.forward(x + word_vec)
         ff_result = self.feedForward.forward(o)
         o2 = self.layerNorm2.forward(ff_result + o)
@@ -79,29 +74,36 @@ class FeedForward(Module):
 
 
 if __name__ == "__main__":
-    print("Offset 209, length 4, Rule ID: COMMA_COMPOUND_SENTENCE\nMessage: Use a comma before \u2018and\u2019 if it connects two independent clauses (unless they are closely connected and short).\nSuggestion: , and\n...d by the alienation caused by capitalism and it prevents humans from living a joyful...\n")
-    pass
-    # _pad_index = 0
-    # _vocab_size = len(_word_id)
-    # _embedding_dim = 128
-    # _hidden_size = 516
-    # _num_head = 8
-    # _out_dim = 512
-    # max_epoch = 50
-    # batch = 10
-    # _num_layers = 2
-    # transformer = Bert(_vocab_size, _embedding_dim, _hidden_size, _num_head, 512, _num_layers)
-    # transformer.to(device)
-    # with h5py.File('data.h5', 'r') as f:
-    #     # 将 NumPy 数组转换回 PyTorch tensor
-    #     a_tensor = torch.from_numpy(f["article_1"][:]).to(device)
-    # mask1 = a_tensor != 0  # random mask for guessing
-    #
-    #
-    # result = transformer.forward(a_tensor, _word_id, mask1.to(device), 0.2)
-    # transformer.train()
-    # optimizer = torch.optim.Adam(transformer.parameters())
-    # trainer = Train(transformer, optimizer)
-    # trainer.PYTORCH_train(train_questions, train_answer, test_questions, test_answer, batch,
-    #                       max_epoch, word_id, id_word, log_dir="runs", log=True,
-    #                       log_file_name="Transformer")
+    with open('saved_word_id.json', 'r', encoding='utf-8') as f:
+        _word_id = json.load(f)
+    with open('saved_id_word.json', 'r', encoding='utf-8') as f:
+        _id_word = json.load(f)
+    with open(r'C:\Users\123\PycharmProjects\words2\AA\wiki_00.json', 'r', encoding='utf-8') as f:
+        _words = json.load(f)['words']
+    _pad_index = 0
+    _vocab_size = len(_word_id)
+    _embedding_dim = 128
+    _hidden_size = 516
+    _num_head = 8
+    _out_dim = 512
+    max_epoch = 50
+    batch = 10
+    _num_layers = 1
+    for article in range(len(_words)):
+        for sentence in range(len(_words[article])):
+            for idx3, word in enumerate(_words[article][sentence]):
+                _words[article][sentence][idx3] = _word_id[word]
+            _words[article][sentence] = torch.tensor(_words[article][sentence], device=device, dtype=torch.int32)
+        _words[article].insert(0, torch.tensor([0] * (len(max(_words[article], key=len)) + 1), device=device, dtype=torch.int32))
+        _words[article] = torch.nn.utils.rnn.pad_sequence(_words[article], batch_first=True)
+    bert = Bert(_vocab_size, _embedding_dim, _hidden_size, _num_head, 512, _num_layers)
+    bert.to(device=device, dtype=torch.float32)
+    mask1 = _words[1] != 0  # random mask for guessing
+    bert.train()
+    optimizer = torch.optim.Adam(bert.parameters())
+    trainer = Train(bert, optimizer)
+    trainer.add_bar('Epoch', 'Iter')
+    trainer.add_metrics('loss')
+    trainer.custom_train(_words, _words, batch,
+                         max_epoch, _word_id, _id_word, log_dir="bert", log=True,
+                         log_file_name="Bert")

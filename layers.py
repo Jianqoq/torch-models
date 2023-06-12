@@ -788,72 +788,6 @@ class Rnnlm:
             i.reset_state()
 
 
-class RnnlmTrainer:
-    def __init__(self, model, optimizer):
-        self.model = model
-        self.optimizer = optimizer
-        self.time_idx = None
-        self.ppl_list = None
-        self.eval_interval = None
-        self.current_epoch = 0
-
-    def get_batch(self, x, t, batch_size, time_size):
-        batch_x = np.empty((batch_size, time_size), dtype='i')
-        batch_t = np.empty((batch_size, time_size), dtype='i')
-
-        data_size = len(x)
-        jump = data_size // batch_size
-        offsets = [i * jump for i in range(batch_size)]  # バッチの各サンプルの読み込み開始位置
-
-        for time in range(time_size):
-            for i, offset in enumerate(offsets):
-                batch_x[i, time] = x[(offset + self.time_idx) % data_size]
-                batch_t[i, time] = t[(offset + self.time_idx) % data_size]
-            self.time_idx += 1
-        return batch_x, batch_t
-
-    def fit(self, xs, ts, max_epoch=10, batch_size=20, time_size=35,
-            max_grad=None, eval_interval=20):
-        data_size = len(xs)
-        max_iters = data_size // (batch_size * time_size)
-        self.time_idx = 0
-        self.ppl_list = []
-        self.eval_interval = eval_interval
-        model, optimizer = self.model, self.optimizer
-        total_loss = 0
-        loss_count = 0
-        total = max_epoch * max_iters
-        begin = time.time()
-        count = 0
-        for epoch in range(max_epoch):
-            for iters in range(max_iters):
-                batch_x, batch_t = self.get_batch(xs, ts, batch_size, time_size)
-
-                # 勾配を求め、パラメータを更新
-                loss = model.forward(batch_x, batch_t)
-                model.backward()
-                params, grads = remove_duplicate(model.params, model.grads)  # 共有された重みを1つに集約
-                if max_grad is not None:
-                    clip_grads(grads, max_grad)
-                optimizer.update(params, grads)
-                total_loss += loss
-                loss_count += 1
-                count += 1
-                ppl = np.exp(total_loss / loss_count)
-                print_result(count, total, begin, ppl, optimizer.lr)
-                # パープレキシティの評価
-                if (eval_interval is not None) and not iters % eval_interval:
-                    self.ppl_list.append(float(ppl))
-                    total_loss, loss_count = 0, 0
-
-            self.current_epoch += 1
-
-    def save(self):
-        params, grads = remove_duplicate(self.model.params, self.model.grads)
-        for index, i in enumerate(params):
-            np.save(f"weights{index}.npy", i)
-
-
 class SGD:
     '''
     確率的勾配降下法（Stochastic Gradient Descent）
@@ -1538,8 +1472,65 @@ def evaluate(model, question, answer, word_id, id_word, size):
     return 1 if answers == list(answer[:, 1:][0]) else 0
 
 
-class Train:
+class printProcess:
+    def __init__(self):
+        self.ls = []
+        self.metrics = []
+        self.percentage = None
+
+    def print_result(self, *args, begin=None, timing=True):
+        """ format: (current, total), metrics"""
+        ls = self.ls
+        blocks = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉']
+        percentage = []
+        # epoch index should be 1 <= index <= 20 (200 updates)
+        count = 0
+        for i in args:
+            if isinstance(i, tuple):
+                percentage.append(i[0] * 100 / i[1])
+                count += 1
+        assert count == len(ls), "bar not match the arguments input"
+        index = [min(int(percent / 5), 20) for percent in percentage]
+
+        fine = [(int(percent / 0.625) if percent % 0.625 == 0 else math.floor(percent / 0.625)) % 8 for percent in
+                percentage]
+
+        for idx, (title, bar) in enumerate(ls):
+            bar[1:1 + index[idx]] = '█' * len(bar[1:1 + index[idx]])
+            if index[idx] < 20:
+                bar[1 + index[idx]] = blocks[fine[idx]]
+
+        string = "\r"
+        for idx, (title, bar) in enumerate(ls):
+            string += f" ▏{title}: {''.join(bar)} {format(percentage[idx], '.2f')}%"
+
+        string2 = ""
+
+        if begin is not None and timing:
+            string2 += f" ▏Time: {format(time.time() - begin, '.2f')} s"
+        for idx, (title, unit) in enumerate(self.metrics):
+            string2 += f" ▏{title}: {format(args[count + idx], '.2f')} {unit if unit is not None else ''}"
+        for idx, (title, bar) in enumerate(ls):
+            bar[1:-1] = ' ' * 20
+        print(string + string2, end='', flush=True)
+
+    def add_bar(self, *title):
+        for i in title:
+            self.ls.append((i, list('│' + ' ' * 20 + '│')))
+
+    def add_metrics(self, *metrics):
+        for i in metrics:
+            if isinstance(i, str):
+                i = (i, None)
+            if len(i) == 1:
+                self.metrics.append((i[0], None))
+            else:
+                self.metrics.append(i)
+
+
+class Train(printProcess):
     def __init__(self, model, optimizer):
+        super().__init__()
         self.Tensorboard_logdir = None
         self.writer = None
         self.url = None
@@ -1644,91 +1635,37 @@ class Train:
         print('copy to run:', ''.join(['tensorboard', f' --logdir={log_dir}', f' --port={tensorboard_port}',
                                        f' --reload_interval={Tensorboard_reloadInterval}']))
 
-    @staticmethod
-    def print_result(current_epoch, total_epoch, current_iters, total_iters, begin, loss, lr, round=None):
-        blocks = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉']
-        list1 = list('│' + ' ' * 20 + '│')  # length 22 last_index: 21
-        list2 = list('│' + ' ' * 20 + '│')  # length 22 last_index: 21
+    def custom_train(self, train_question, test_question, batch_size,
+                     max_epoch, word_id, id_word, log=True, log_dir=None, Tensorboard_reloadInterval=30,
+                     log_file_name=''):
+        max_iter = sum([len(i) for i in train_question]) // batch_size
+        begin = time.time()
+        average_loss = 0
+        if log:
+            self.open_tensorboard(log_dir, Tensorboard_reloadInterval, f"({log_file_name})")
 
-        # epoch index should be 1 <= index <= 20 (200 updates)
-        epoch_percentage = current_epoch * 100 / total_epoch
-        iter_percentage = current_iters * 100 / total_iters
-
-        epoch_index = min(int(epoch_percentage / 5), 20)
-        iter_index = min(int(iter_percentage / 5), 20)
-        epoch_fine = (int(epoch_percentage / 0.625) if epoch_percentage % 0.625 == 0 else math.floor(
-            epoch_percentage / 0.625)) % 8
-        iter_fine = (int(iter_percentage / 0.625) if iter_percentage % 0.625 == 0 else math.floor(
-            iter_percentage / 0.625)) % 8
-
-        list1[1:1 + epoch_index] = '█' * len(list1[1:1 + epoch_index])
-        list2[1:1 + iter_index] = '█' * len(list2[1:1 + iter_index])
-        if epoch_index < 20: list1[1 + epoch_index] = blocks[epoch_fine]
-        if iter_index < 20: list2[1 + iter_index] = blocks[iter_fine]
-        string1 = ''.join(list1)
-        string2 = ''.join(list2)
-
-        time1 = time.time() - begin
-        print(f'\rEpoch: {string1} {format(epoch_percentage, ".2f")}% |'
-              f' Iters: {string2} {format(iter_percentage, ".2f")}% | Time: {time1:.3f}s | loss: {loss:.3f} | lr: {lr:.3f}'
-              f' | current round: {round}',
-              end='',
-              flush=True)
-
-
-class printProcess:
-    def __init__(self):
-        self.ls = []
-        self.metrics = []
-        self.percentage = None
-
-    def print_result(self, *args, begin=None, timing=True):
-        """ format: (current, total), metrics"""
-        ls = self.ls
-        blocks = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉']
-        percentage = []
-        # epoch index should be 1 <= index <= 20 (200 updates)
-        count = 0
-        for i in args:
-            if isinstance(i, tuple):
-                percentage.append(i[0] * 100 / i[1])
-                count += 1
-        assert count == len(ls), "bar not match the arguments input"
-        index = [min(int(percent / 5), 20) for percent in percentage]
-
-        fine = [(int(percent / 0.625) if percent % 0.625 == 0 else math.floor(percent / 0.625)) % 8 for percent in
-                percentage]
-
-        for idx, (title, bar) in enumerate(ls):
-            bar[1:1 + index[idx]] = '█' * len(bar[1:1 + index[idx]])
-            if index[idx] < 20:
-                bar[1 + index[idx]] = blocks[fine[idx]]
-
-        string = "\r"
-        for idx, (title, bar) in enumerate(ls):
-            string += f" ▏{title}: {''.join(bar)} {format(percentage[idx], '.2f')}%"
-
-        string2 = ""
-
-        if begin is not None and timing:
-            string2 += f" ▏Time: {format(time.time() - begin, '.2f')} s"
-        for idx, (title, unit) in enumerate(self.metrics):
-            string2 += f" ▏{title}: {args[count + idx]} {unit if unit is not None else ''}"
-
-        print(string + string2, end='', flush=True)
-
-    def add_bar(self, *title):
-        for i in title:
-            self.ls.append((i, list('│' + ' ' * 20 + '│')))
-
-    def add_metrics(self, *metrics):
-        for i in metrics:
-            if isinstance(i, str):
-                i = (i, None)
-            if len(i) == 1:
-                self.metrics.append((i[0], None))
-            else:
-                self.metrics.append(i)
+        for epoch in range(max_epoch):
+            iters = 0
+            for article in train_question:
+                for i in range(len(article)):
+                    start = i * batch_size + 1
+                    if start >= len(article):
+                        break
+                    batch_question = article[start:(i + 1) * batch_size + 1]
+                    mask = batch_question != 0
+                    self._optimizer.zero_grad()
+                    loss = self._model.forward(batch_question, word_id, mask, 0.2)
+                    loss.backward()
+                    self._optimizer.step()
+                    self.print_result((epoch, max_epoch), (iters, max_iter), loss, begin=begin, timing=True)
+                    iters += 1
+            self.print_result((epoch, max_epoch), (max_iter, max_iter), loss, begin=begin, timing=True)
+            if self.writer is not None:
+                self.writer.add_scalar("loss", loss, epoch)
+        self.print_result((max_epoch, max_epoch), (max_iter, max_iter), average_loss, begin=begin, timing=True)
+        if self.writer is not None and self.tensorboard_process is not None:
+            self.writer.close()
+            self.tensorboard_process.terminate()
 
 
 if __name__ == "__main__":
