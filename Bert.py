@@ -46,7 +46,7 @@ class Bert(Module, BaseEstimator):
         self.to(device)
 
     def forward(self, masked_sentence, mask0):
-        pad = torch.eq(mask0, False)
+        pad = torch.eq(mask0, torch.tensor(False, device=self.device, dtype=torch.bool))
         segments = torch.ones(masked_sentence.shape, dtype=torch.int, device=self.device) * mask0  # mask0 non pad mask
         if len(masked_sentence.shape) > 1:
             positions = torch.arange(masked_sentence[0].shape[0], device=self.device).unsqueeze(0).repeat(
