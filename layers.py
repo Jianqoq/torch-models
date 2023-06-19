@@ -1,6 +1,10 @@
+import gc
+import json
 import math
 import os
 import sys
+
+from tokenizers.implementations import BertWordPieceTokenizer
 
 import ad
 import time
@@ -368,7 +372,7 @@ class Preprocess:
         id_word = {}
         corpus = []
         append = corpus.append
-        counter = 3
+        counter = 4
         for index, i in enumerate(text):
             word_id[i] = counter
             id_word[counter] = i
@@ -1507,9 +1511,25 @@ class printProcess:
         string2 = ""
 
         if begin is not None and timing:
-            string2 += f" ▏Time: {format(time.time() - begin, '.2f')} s"
-        for idx, (title, unit) in enumerate(self.metrics):
-            string2 += f" ▏{title}: {format(args[count + idx], '.2f')} {unit if unit is not None else ''}"
+            elapsed = int(time.time() - begin)
+            if 3600 >= elapsed >= 60:
+                mins = elapsed // 60
+                sec = elapsed % 60
+                elapsed = f"{mins}min{sec}s"
+            elif 3600 <= elapsed:
+                hour = elapsed // 3600
+                remainder = elapsed % 3600
+                mins = remainder // 60
+                sec = remainder % 60
+                elapsed = f"{hour}h{mins}min{sec}s"
+            else:
+                elapsed = f"{elapsed}s"
+            string2 += f" ▏Time: {elapsed}"
+        for idx, (title, tp, unit) in enumerate(self.metrics):
+            to_print = args[count + idx]
+            if tp in (int, float, torch.Tensor, np.ndarray):
+                to_print = format(float(args[count + idx]), '.5f')
+            string2 += f" ▏{title}: {to_print} {unit if unit is not None else ''}"
         for idx, (title, bar) in enumerate(ls):
             bar[1:-1] = ' ' * 20
         print(string + string2, end='', flush=True)
@@ -1519,14 +1539,16 @@ class printProcess:
             self.ls.append((i, list('│' + ' ' * 20 + '│')))
 
     def add_metrics(self, *metrics):
-        for i in metrics:
-            if isinstance(i, str):
-                i = (i, None)
-            if len(i) == 1:
-                self.metrics.append((i[0], None))
-            else:
-                self.metrics.append(i)
-
+        """
+        metrics (title, type, unit)
+        """
+        if isinstance(metrics, str):
+            metrics = (metrics, None, None)
+        elif len(metrics) == 1:
+            metrics = (*metrics, None, None)
+        elif len(metrics) == 2:
+            metrics = (*metrics, None)
+        self.metrics.append(metrics)
 
 class Train(printProcess):
     def __init__(self, model, optimizer):
@@ -1635,34 +1657,98 @@ class Train(printProcess):
         print('copy to run:', ''.join(['tensorboard', f' --logdir={log_dir}', f' --port={tensorboard_port}',
                                        f' --reload_interval={Tensorboard_reloadInterval}']))
 
-    def custom_train(self, train_question, test_question, batch_size,
-                     max_epoch, word_id, id_word, log=True, log_dir=None, Tensorboard_reloadInterval=30,
-                     log_file_name=''):
-        max_iter = sum([len(i) for i in train_question]) // batch_size
+    def custom_train(self, files, scheduler, batch_size,
+                     max_epoch, log=True, log_dir=None, Tensorboard_reloadInterval=30,
+                     log_file_name='', monitor=True, pick_params=False):
+        from torch.cuda.amp import GradScaler, autocast
         begin = time.time()
         average_loss = 0
+        max_iter = 0
+        loss = 0
+        scaler = GradScaler()
         if log:
             self.open_tensorboard(log_dir, Tensorboard_reloadInterval, f"({log_file_name})")
+        COUNT = 0
+        loss_func = torch.nn.CrossEntropyLoss(ignore_index=0)
+        path = None
+        min_loss = 20
+        self.add_metrics('path')
+        self.add_metrics('out of mem')
+        to_save = {}
+        out_of_memory = 0
+        best_loss = 20
 
+        def run():
+            try:
+                prob_mask, not_prob_mask = self._model.get_prob_mask(mask, 0.2)
+                masked_sentence = prob_mask * self._model.tokenizer.token_to_id("[MASK]") + not_prob_mask.mul_(
+                    batch_question)
+                score = self._model.forward(masked_sentence, mask)
+                score.mul_(prob_mask.unsqueeze(-1).expand(-1, -1, self._model.vocab_size))
+                score = torch.permute(score, (0, 2, 1))
+                return loss_func.forward(score, batch_question * prob_mask)
+            except torch.cuda.OutOfMemoryError:
+                raise RuntimeError('out of mem')
         for epoch in range(max_epoch):
-            iters = 0
-            for article in train_question:
-                for i in range(len(article)):
-                    start = i * batch_size + 1
-                    if start >= len(article):
-                        break
-                    batch_question = article[start:(i + 1) * batch_size + 1]
-                    mask = batch_question != 0
-                    self._optimizer.zero_grad()
-                    loss = self._model.forward(batch_question, word_id, mask, 0.2)
-                    loss.backward()
-                    self._optimizer.step()
-                    self.print_result((epoch, max_epoch), (iters, max_iter), loss, begin=begin, timing=True)
-                    iters += 1
-            self.print_result((epoch, max_epoch), (max_iter, max_iter), loss, begin=begin, timing=True)
-            if self.writer is not None:
-                self.writer.add_scalar("loss", loss, epoch)
-        self.print_result((max_epoch, max_epoch), (max_iter, max_iter), average_loss, begin=begin, timing=True)
+            train_question = self._model.generate_data(files)
+            for article, mask0, path in train_question:
+                if isinstance(article, torch.Tensor) and len(article) > 0:
+                    iters = 0
+                    max_iter = len(article) // batch_size if len(article) >= batch_size else 1
+                    average_loss = 0
+                    for i in range(max_iter):
+                        start = i * batch_size + 1
+                        if pick_params:
+                            article = article.to(device=device, dtype=torch.long)
+                            mask0 = mask0.to(device=device)
+                        self._optimizer.zero_grad()
+                        with autocast():
+                            try:
+                                batch_question = article[start:(i + 1) * batch_size + 1]
+                                mask = mask0[start:(i + 1) * batch_size + 1]
+                                loss = run()
+                                average_loss += loss
+                            except RuntimeError:
+                                out_of_memory += 1
+                                torch.cuda.empty_cache()
+                                try:
+                                    loss = run()
+                                    average_loss += loss
+                                except RuntimeError:
+                                    raise RuntimeError('Double freed')
+                        scaler.scale(loss).backward()
+                        scaler.step(self._optimizer)
+                        if scheduler:
+                            scheduler.step()
+                        scaler.update()
+                        self.print_result((epoch, max_epoch), (iters, max_iter), loss, path, out_of_memory, begin=begin, timing=True)
+                        iters += 1
+                    if self.writer:
+                        COUNT += 1
+                        try:
+                            if average_loss / max_iter < min_loss:
+                                min_loss = average_loss
+                                try:
+                                    torch.save(self._model.state_dict(), 'model_weights.pth')
+                                except Exception as e:
+                                    print(e)
+                                self._model.generate_predicted_text(batch_question[0], mask[0], 0.2, to_save,
+                                                                    COUNT, monitor=monitor)
+                                with open(f"result/monitoring{epoch}.json", "w", encoding='utf-8') as fp:
+                                    fp.write(json.dumps(to_save, indent=4))
+                                    to_save.clear()
+                        except ZeroDivisionError:
+                            print(average_loss, max_iter, path, len(article), batch_size)
+                        self.writer.add_scalar("loss", average_loss / max_iter, COUNT)
+                    self.print_result((epoch, max_epoch), (max_iter, max_iter), loss, path, out_of_memory, begin=begin, timing=True)
+            try:
+                if best_loss >= average_loss:
+                    torch.save(self._model.state_dict(), 'model_weights.pth')
+                    best_loss = average_loss
+                torch.save(self._model.state_dict(), 'model_weights2.pth')
+            except Exception as e:
+                print(e)
+        self.print_result((max_epoch, max_epoch), (max_iter, max_iter), loss, path, out_of_memory, begin=begin, timing=True)
         if self.writer is not None and self.tensorboard_process is not None:
             self.writer.close()
             self.tensorboard_process.terminate()

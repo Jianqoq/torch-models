@@ -18,7 +18,6 @@ class Transformer(Module):
         self.wordEmbedding2 = Embedding(corpus, embedding_dim)
         self.decoder = ModuleList([Decoder(embedding_dim, hidden_size, num_head) for _ in range(num_layers)])
         self.linear = Linear(embedding_dim, corpus)
-        self.softmax = Softmax(dim=2)
         self.loss = CrossEntropyLoss(ignore_index=_pad_index)
         self._pad_index = _pad_index
         self.num_heads = num_head

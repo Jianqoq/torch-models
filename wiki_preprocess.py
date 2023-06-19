@@ -204,7 +204,7 @@ def clean_data(to_write, path, pattern_list):
                     del copy, copy2
             f.write(json.dumps({"words": text_list2}, indent=4))
         except Exception as e:
-            print(e)
+            raise Exception(e)
     with open(f"{to_write}_sentence.json", 'w', encoding='utf-8') as f:
         f.write(json.dumps(dictionary, indent=4))
 
@@ -248,8 +248,8 @@ def get_train(path, cores=None, pattern_list=None):
     task = []
     articles = 0
     begin = time.time()
-    # char_list = [f"{chr(i)}{chr(j)}" for i in range(65, 91) for j in range(65, 91)]
-    char_list = ["AA"]
+    char_list = [f"{chr(i)}{chr(j)}" for i in range(65, 91) for j in range(65, 91)]
+    # char_list = ["AA"]
     # convert a list of sentence to a list of word token list
     pattern_list = [
         (re.compile(r"(\n)[\w\s/-]*(\n)+"), "\n"),  # remove title
@@ -288,25 +288,28 @@ def get_train(path, cores=None, pattern_list=None):
     ] if pattern_list is None else pattern_list
     with mp.Pool(processes=cpu_cores) as pool:
         pool_map = pool.starmap
-        for chars in char_list:
-            for i in range(100):
-                if i == 0:
-                    os.makedirs(rf"C:\Users\123\PycharmProjects\words2\{chars}", exist_ok=True)
-                if len(task) == cpu_cores:
-                    to_write = rf"C:\Users\123\PycharmProjects\words2\{chars}\wiki_{i:02}.json"
-                    file_path = fr"{path}\{chars}\wiki_{i:02}"
-                    task.append((to_write, file_path, pattern_list))
-                    results = pool_map(clean_data, task)
-                    for k in results:
-                        for word in k:
-                            all_words.add(word)
-                    articles += len(task)
-                    p.print_result(articles, file_path, begin=begin, timing=True)
-                    task.clear()
-                else:
-                    to_write = rf"C:\Users\123\PycharmProjects\words2\{chars}\wiki_{i:02}.json"
-                    file_path = fr"{path}\{chars}\wiki_{i:02}"
-                    task.append((to_write, file_path, pattern_list))
+        try:
+            for chars in char_list:
+                for i in range(100):
+                    if i == 0:
+                        os.makedirs(rf"C:\Users\123\PycharmProjects\words2\{chars}", exist_ok=True)
+                    if len(task) == cpu_cores:
+                        to_write = rf"C:\Users\123\PycharmProjects\words2\{chars}\wiki_{i:02}.json"
+                        file_path = fr"{path}\{chars}\wiki_{i:02}"
+                        task.append((to_write, file_path, pattern_list))
+                        results = pool_map(clean_data, task)
+                        for k in results:
+                            for word in k:
+                                all_words.add(word)
+                        articles += len(task)
+                        p.print_result(articles, file_path, begin=begin, timing=True)
+                        task.clear()
+                    else:
+                        to_write = rf"C:\Users\123\PycharmProjects\words2\{chars}\wiki_{i:02}.json"
+                        file_path = fr"{path}\{chars}\wiki_{i:02}"
+                        task.append((to_write, file_path, pattern_list))
+        except:
+            pass
 
     word_id, id_word, corpus = Preprocess.get_word_id(all_words)
     word_id["[CLS]"] = 1
@@ -314,7 +317,9 @@ def get_train(path, cores=None, pattern_list=None):
     word_id["[PAD]"] = 0
     id_word[0] = "[PAD]"
     word_id["[MASK]"] = 2
-    id_word[3] = "[MASK]"
+    id_word[2] = "[MASK]"
+    word_id["[SEP]"] = 3
+    id_word[3] = "[SEP]"
 
     with open("saved_word_id.json", "w") as fp:
         json.dump(word_id, fp, indent=4)
