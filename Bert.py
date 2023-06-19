@@ -18,12 +18,12 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
 class Bert(Module, BaseEstimator):
-    def __init__(self, corpus, embedding_dim, hidden_size, num_head,
+    def __init__(self, embedding_dim, hidden_size, num_head,
                  max_length, num_layers, tokenizer: BertWordPieceTokenizer,
                  n_segments=2, learning_rate=1e-4,
                  device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu")):
         super().__init__()
-        self.corpus = corpus
+        self.corpus = tokenizer.get_vocab_size()
         self.embedding_dim = embedding_dim
         self.hidden_size = hidden_size
         self.num_head = num_head
@@ -32,15 +32,15 @@ class Bert(Module, BaseEstimator):
         self.n_segments = n_segments
         self.learning_rate = learning_rate
         self.device = device
-        self.tokenEmbedding = Embedding(corpus, embedding_dim, device=device)
+        self.tokenEmbedding = Embedding(self.corpus, embedding_dim, device=device)
         self.segmentEmbedding = Embedding(n_segments, embedding_dim, device=device)
         self.position_embedding = Embedding(max_length, embedding_dim, device=device)
         self.encoder = ModuleList(Encoder(embedding_dim, hidden_size, num_head, device) for _ in range(num_layers))
-        self.linear = Linear(embedding_dim, corpus, device=device)
+        self.linear = Linear(embedding_dim, self.corpus, device=device)
         self.softmax = torch.nn.Softmax(dim=-1)
         self.loss_func = torch.nn.CrossEntropyLoss(ignore_index=0)
         self.num_heads = num_head
-        self.vocab_size = corpus
+        self.vocab_size = self.corpus
         self.learning_rate = learning_rate
         self.tokenizer = tokenizer
         self.to(device)
@@ -86,16 +86,18 @@ class Bert(Module, BaseEstimator):
     def predict_mask(self, text: str):
         self.eval()
         with autocast():
-            text = bert.tokenizer.encode(text).ids
+            text = self.tokenizer.encode(text).ids
             text = torch.nn.functional.pad(torch.tensor(text, device=self.device, dtype=torch.int16),
                                            (0, self.max_length - len(text)))
+            prob_mask = text == torch.tensor(self.tokenizer.token_to_id('[MASK]'), device=self.device,
+                                             dtype=torch.int16)
             mask0 = text != 0
             with torch.no_grad():
                 score = self.forward(text, mask0)
                 probability = self.softmax.forward(score)
                 words = torch.argmax(probability, dim=-1)
-                words.mul_(~torch.isin(text, torch.tensor([0, 1, 2, 3, 5], device=self.device)))
-            predicted_str = self.tokenizer.decode([i for i in words.tolist()])
+                words.mul_(prob_mask)
+            predicted_str = dict(enumerate(self.tokenizer.id_to_token(i) for i in words.tolist() if i != 0))
         return predicted_str
 
     def fit(self, x, **fit_params):
@@ -285,7 +287,7 @@ if __name__ == "__main__":
     max_epoch = 10
     batch = 140
     _num_layers = 12
-    bert = Bert(_tokenizer.get_vocab_size(), _embedding_dim, _hidden_size, _num_head, 128, _num_layers, _tokenizer)
+    bert = Bert(_embedding_dim, _hidden_size, _num_head, 128, _num_layers, _tokenizer)
     bert.train()
     optimizer = torch.optim.AdamW(bert.parameters(), lr=1e-4)
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=10000, num_training_steps=416100)
