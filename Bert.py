@@ -1,15 +1,15 @@
 import json
-from language_tool_python import LanguageTool
+import os
+import sys
+
 import torch
 from sklearn.base import BaseEstimator
 from torch import optim
 from torch.cuda.amp import autocast
-from torch.nn import Module, MultiheadAttention, Linear, Embedding, LayerNorm, ModuleList, GELU, Dropout
+from torch.nn import Module, MultiheadAttention, Linear, Embedding, LayerNorm, ModuleList, GELU, Dropout, ReLU
 from tokenizers.implementations import BertWordPieceTokenizer
-from layers import Train, printProcess
+from layers import Train
 from transformers import get_linear_schedule_with_warmup
-import multiprocessing as mp
-from typing import List, Union
 torch.random.manual_seed(42)
 torch.cuda.manual_seed_all(42)
 torch.backends.cudnn.deterministic = True
@@ -59,8 +59,8 @@ class Bert(Module, BaseEstimator):
         inp = word_vec + segment + position
         for i in self.encoder:
             inp = i.forward(inp, pad)
-        linear = self.linear.forward(inp)
-        return linear
+        return inp
+        # return self.linear.forward(inp)
 
     def generate_predicted_text(self, questions, mask0, prob, to_save, key, monitor=False):
         ques_str = self.tokenizer.decode(questions.tolist())
@@ -94,6 +94,7 @@ class Bert(Module, BaseEstimator):
             mask0 = text != 0
             with torch.no_grad():
                 score = self.forward(text, mask0)
+                score = self.linear(score)
                 probability = self.softmax.forward(score)
                 words = torch.argmax(probability, dim=-1)
                 words.mul_(prob_mask)
@@ -104,6 +105,7 @@ class Bert(Module, BaseEstimator):
         _batch = fit_params["batch_size"]
         _max_epoch = fit_params["max_epoch"]
         _tokenizer = fit_params["tokenizer"]
+        _layer = fit_params["layer"]
         global COUNT
         COUNT += 1
         print(COUNT, 'embedding', self.embedding_dim, 'hidden_size', self.hidden_size, 'num_head', self.num_head)
@@ -112,23 +114,8 @@ class Bert(Module, BaseEstimator):
         trainr = Train(self, optimizr)
         trainr.add_bar('Epoch', 'Iter')
         trainr.add_metrics('loss', float)
-        trainr.custom_train(x, None, _batch, _max_epoch, log_dir="bert", log=False,
-                            log_file_name="Bert", monitor=False, pick_params=True)
-
-    @staticmethod
-    def generate_data(files_list):
-        for path in files_list:
-            with open(path, 'r', encoding='utf-8') as f:
-                ids = json.load(f)['ids']
-                for k in range(len(ids) - 1, -1, -1):
-                    if len(ids[k]) > 127:
-                        del ids[k]
-                max_length = (max(len(sublist) for sublist in ids) + 1)
-                ids.insert(0, [0] * max_length)
-                for i in range(len(ids)):
-                    ids[i] = torch.tensor(ids[i], dtype=torch.long, device=DEVICE)
-                to_return = torch.nn.utils.rnn.pad_sequence(ids, batch_first=True, padding_value=0)
-                yield to_return, to_return != 0, path
+        trainer.down_stream(batch, max_epoch, layer, log_dir="Bert_down_stream", log=True,
+                            log_file_name="Bert_down_stream", monitor=False)
 
     @staticmethod
     def get_total_steps(files_list, batch_size, _max_epoch):
@@ -177,11 +164,32 @@ class Bert(Module, BaseEstimator):
                 _count += 1
         return -float(total_loss / _count)
 
-    @staticmethod
-    def get_prob_mask(mask0, prob):
-        prob_mask = torch.bernoulli(torch.full(mask0.shape, prob, dtype=torch.float16, device=DEVICE).mul_(mask0)).short()
-        not_prob_mask = torch.tensor(1, dtype=torch.int16, device=DEVICE) - prob_mask
-        return prob_mask, not_prob_mask
+    def down_stream(self, question, answer, batch_size):
+        correct = torch.tensor(0., device=self.device)
+        count = 0
+        self.eval()
+        def run(train):
+            try:
+                with torch.no_grad():
+                    score = self.forward(train, mask.to(device=self.device))
+                    score = layer(score)[:, 0, :]
+                    score = self.softmax(score)
+                    score = torch.argmax(score, dim=-1)
+                return score == answers
+            except Exception as e:
+                raise e
+        max_iter = len(question) // batch_size
+        for i in range(max_iter):
+            start = i * batch_size + 1
+            with autocast():
+                batch_question = question[start:(i + 1) * batch_size + 1].to(device=self.device)
+                answers = answer[start:(i + 1) * batch_size + 1].to(device=self.device)
+                mask = batch_question != 0
+                corrects = run(batch_question)
+                correct += sum(corrects) / len(corrects)
+                count += 1
+        self.train()
+        return correct / count
 
 
 class Encoder(Module):
@@ -213,6 +221,22 @@ class FeedForward(Module):
         return self.linear2(self.relu(self.linear1(x)))
 
 
+class FeedForward2(Module):
+    def __init__(self, in_feature, out_feature, hidden_feature, device):
+        super().__init__()
+        self.linear1 = Linear(in_feature, hidden_feature, device=device)
+        self.linear2 = Linear(hidden_feature, out_feature, device=device)
+        self.drop_out = Dropout(0.5)
+        self.relu = ReLU()
+
+    def forward(self, x):
+        hidden = self.linear1(x)
+        result = self.relu(hidden)
+        result = self.drop_out(result)
+        hidden = self.linear2(result)
+        return hidden
+
+
 def generate_list_data(files_list):
     to = []
     for path in files_list:
@@ -230,37 +254,9 @@ def generate_list_data(files_list):
     return to
 
 
-def filter_data(files_list):
-    p = printProcess()
-    p.add_bar('progress')
-    p.add_bar('current file')
-    cores = mp.cpu_count() - 8
-    new = split_list(files_list, cores)
-    with mp.Pool(processes=cores) as pool:
-        pool_map = pool.starmap
-        pool_map(pick, [(i, LanguageTool('en-US')) for i in new])
-
-
 def split_list(alist, wanted_parts=1):
     length = len(alist)
     return [alist[i * length // wanted_parts: (i + 1) * length // wanted_parts] for i in range(wanted_parts)]
-
-
-def pick(files_list, tool):
-    for path in files_list:
-        with open(path, 'r', encoding='utf-8') as f:
-            to_save = []
-            ids = json.load(f)
-            for key in ids:
-                print(path)
-                sentence_list = ids[key]
-                for idx in range(len(sentence_list) - 1, -1, -1):
-                    match = tool.check(sentence_list[idx])
-                    if match:
-                        del sentence_list[idx]
-                to_save += sentence_list
-        with open(path + 'filtered.json', 'w', encoding='utf-8') as fp:
-            fp.write(json.dumps({'filtered': to_save}, indent=4))
 
 
 def generate_steps(files_list):
@@ -275,8 +271,11 @@ def generate_steps(files_list):
 
 if __name__ == "__main__":
     _tokenizer = BertWordPieceTokenizer("custom/vocab.txt")
+    # _tokenizer = BertWordPieceTokenizer("/mnt/c/Users/123/PycharmProjects/torch-models/custom/vocab.txt")
     char_list = [f"{chr(i)}{chr(j)}" for i in range(65, 91) for j in range(65, 91)]
     char_list = char_list[:char_list.index('FT') + 1]
+    # files = [fr"/mnt/c/Users/123/PycharmProjects/words2/{chars}/wiki_{i:02}.json_sentence.json_json.json.json" for i in
+    #          range(15) for chars in char_list]
     files = [fr"C:\Users\123\PycharmProjects\words2\{chars}\wiki_{i:02}.json_sentence.json_json.json.json" for i in
              range(15) for chars in char_list]
     count = 0
@@ -284,16 +283,18 @@ if __name__ == "__main__":
     _hidden_size = 3072
     _num_head = 12
     _out_dim = 512
-    max_epoch = 10
+    max_epoch = 5
     batch = 140
     _num_layers = 12
+    vocab_size = _tokenizer.get_vocab_size()
     bert = Bert(_embedding_dim, _hidden_size, _num_head, 128, _num_layers, _tokenizer)
+    bert.load_state_dict(torch.load("bert.pth"))
     bert.train()
-    optimizer = torch.optim.AdamW(bert.parameters(), lr=1e-4)
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=10000, num_training_steps=416100)
+    # layer = FeedForward2(384, 2, 3072, device=bert.device)
+    layer = Linear(384, 2, device=bert.device)
+    optimizer = torch.optim.Adam(list(layer.parameters()) + list(bert.parameters()), lr=1e-4)
     trainer = Train(bert, optimizer)
     trainer.add_bar('Epoch', 'Iter')
     trainer.add_metrics('loss', float)
-    trainer.custom_train(files, scheduler, batch,
-                         max_epoch, log_dir="bert", log=True,
-                         log_file_name="Bert", monitor=False)
+    trainer.down_stream(batch, max_epoch, layer, log_dir="Bert_down_stream", log=True,
+                        log_file_name="Bert_down_stream", monitor=False)

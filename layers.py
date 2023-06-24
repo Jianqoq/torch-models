@@ -2,10 +2,6 @@ import gc
 import json
 import math
 import os
-import sys
-
-from tokenizers.implementations import BertWordPieceTokenizer
-
 import ad
 import time
 import random
@@ -15,9 +11,30 @@ from torch import tensor
 from torch.utils.tensorboard import SummaryWriter
 import torch
 
+
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 np.random.seed(42)
 
+
+def get_prob_mask(mask0, prob):
+    prob_mask = torch.bernoulli(torch.full(mask0.shape, prob, dtype=torch.float16, device=device).mul_(mask0)).short()
+    not_prob_mask = torch.tensor(1, dtype=torch.int16, device=device) - prob_mask
+    return prob_mask, not_prob_mask
+
+
+def generate_data(files_list):
+    for path in files_list:
+        with open(path, 'r', encoding='utf-8') as f:
+            ids = json.load(f)['ids']
+            for k in range(len(ids) - 1, -1, -1):
+                if len(ids[k]) > 127:
+                    del ids[k]
+            max_length = (max(len(sublist) for sublist in ids) + 1)
+            ids.insert(0, [0] * max_length)
+            for i in range(len(ids)):
+                ids[i] = torch.tensor(ids[i], dtype=torch.long, device=device)
+            to_return = torch.nn.utils.rnn.pad_sequence(ids, batch_first=True, padding_value=0)
+            yield to_return, to_return != 0, path
 
 def softmax(x, dims=0):
     x = x - x.max(axis=dims, keepdims=True)
@@ -1658,7 +1675,7 @@ class Train(printProcess):
                                        f' --reload_interval={Tensorboard_reloadInterval}']))
 
     def custom_train(self, files, scheduler, batch_size,
-                     max_epoch, log=True, log_dir=None, Tensorboard_reloadInterval=30,
+                     max_epoch, vocab_size, tokenizer, log=True, log_dir=None, Tensorboard_reloadInterval=30,
                      log_file_name='', monitor=True, pick_params=False):
         from torch.cuda.amp import GradScaler, autocast
         begin = time.time()
@@ -1680,19 +1697,21 @@ class Train(printProcess):
 
         def run():
             try:
-                prob_mask, not_prob_mask = self._model.get_prob_mask(mask, 0.2)
-                masked_sentence = prob_mask * self._model.tokenizer.token_to_id("[MASK]") + not_prob_mask.mul_(
+                prob_mask, not_prob_mask = get_prob_mask(mask, 0.2)
+                masked_sentence = prob_mask * tokenizer.token_to_id("[MASK]") + not_prob_mask.mul_(
                     batch_question)
-                score = self._model.forward(masked_sentence, mask)
-                score.mul_(prob_mask.unsqueeze(-1).expand(-1, -1, self._model.vocab_size))
+                score = self._model(masked_sentence, mask)
+                score = self._model.linear.forward(score)
+                score.mul_(prob_mask.unsqueeze(-1).expand(-1, -1, vocab_size))
                 score = torch.permute(score, (0, 2, 1))
                 return loss_func.forward(score, batch_question * prob_mask)
             except torch.cuda.OutOfMemoryError:
                 raise RuntimeError('out of mem')
         for epoch in range(max_epoch):
-            train_question = self._model.generate_data(files)
+            train_question = generate_data(files)
             for article, mask0, path in train_question:
                 if isinstance(article, torch.Tensor) and len(article) > 0:
+                    torch.cuda.empty_cache()
                     iters = 0
                     max_iter = len(article) // batch_size if len(article) >= batch_size else 1
                     average_loss = 0
@@ -1703,24 +1722,17 @@ class Train(printProcess):
                             mask0 = mask0.to(device=device)
                         self._optimizer.zero_grad()
                         with autocast():
-                            try:
-                                batch_question = article[start:(i + 1) * batch_size + 1]
-                                mask = mask0[start:(i + 1) * batch_size + 1]
-                                loss = run()
-                                average_loss += loss
-                            except RuntimeError:
-                                out_of_memory += 1
-                                torch.cuda.empty_cache()
-                                try:
-                                    loss = run()
-                                    average_loss += loss
-                                except RuntimeError:
-                                    raise RuntimeError('Double freed')
+                            batch_question = article[start:(i + 1) * batch_size + 1]
+                            mask = mask0[start:(i + 1) * batch_size + 1]
+                            loss = run()
                         scaler.scale(loss).backward()
                         scaler.step(self._optimizer)
                         if scheduler:
                             scheduler.step()
                         scaler.update()
+                        loss = loss.detach_().item()
+                        average_loss += loss
+
                         self.print_result((epoch, max_epoch), (iters, max_iter), loss, path, out_of_memory, begin=begin, timing=True)
                         iters += 1
                     if self.writer:
@@ -1749,6 +1761,94 @@ class Train(printProcess):
             except Exception as e:
                 print(e)
         self.print_result((max_epoch, max_epoch), (max_iter, max_iter), loss, path, out_of_memory, begin=begin, timing=True)
+        if self.writer is not None and self.tensorboard_process is not None:
+            self.writer.close()
+            self.tensorboard_process.terminate()
+
+    def down_stream(self, batch_size,
+                    max_epoch, layer: torch.nn.Module, log=True, log_dir=None, Tensorboard_reloadInterval=30,
+                    log_file_name='', monitor=True, pick_params=False):
+        from torch.cuda.amp import GradScaler, autocast
+        begin = time.time()
+        average_loss = 0
+        max_iter = 0
+        loss = 0
+        scaler = GradScaler()
+        if log:
+            self.open_tensorboard(log_dir, Tensorboard_reloadInterval, f"({log_file_name})")
+        COUNT = 0
+        loss_func = torch.nn.CrossEntropyLoss()
+        path = None
+        min_loss = 20
+        to_save = {}
+        best_loss = 20
+        relu = torch.nn.ReLU()
+
+        def run(train):
+            try:
+                score = self._model.forward(train, mask.to(device=device))
+                score = layer(score)[:, 0, :]
+                score = loss_func.forward(score, answer)
+                return score
+            except Exception as e:
+                raise e
+
+        question = torch.load("amazon_sentences.pth")
+        train_question = question[:int(len(question)*0.8)]
+        test_question = question[int(len(question)*0.8):]
+        answers = torch.load("amazon_labels.pth")
+        train_answer = answers[:int(len(question)*0.8)]
+        test_answer = answers[int(len(question)*0.8):]
+        for epoch in range(max_epoch):
+            # torch.cuda.empty_cache()
+            iters = 0
+            max_iter = len(train_question) // batch_size
+            average_loss = 0
+            for i in range(max_iter):
+                start = i * batch_size + 1
+                if pick_params:
+                    article = train_question[start:(i + 1) * batch_size + 1].to(device=device, dtype=torch.long)
+                    mask0 = train_answer[start:(i + 1) * batch_size + 1].to(device=device)
+                self._optimizer.zero_grad()
+                with autocast():
+                    batch_question = train_question[start:(i + 1) * batch_size + 1].to(device=device)
+                    answer = train_answer[start:(i + 1) * batch_size + 1].to(device=device)
+                    mask = batch_question != 0
+                    loss = run(batch_question)
+                scaler.scale(loss).backward()
+                scaler.step(self._optimizer)
+                scaler.update()
+                loss = loss.detach_().item()
+                average_loss += loss
+
+                self.print_result((epoch, max_epoch), (iters, max_iter), loss, begin=begin, timing=True)
+                iters += 1
+            if self.writer:
+                COUNT += 1
+                try:
+                    if average_loss / max_iter < min_loss:
+                        min_loss = average_loss
+                        try:
+                            torch.save(layer.state_dict(), 'down_stream.pth')
+                            torch.save(self._model.state_dict(), 'down_stream_bert.pth')
+                        except Exception as e:
+                            print(e)
+                except ZeroDivisionError:
+                    print(average_loss, max_iter, path, len(train_question), batch_size)
+                correctness = self._model.down_stream(test_question, test_answer, batch_size)
+                self.writer.add_scalar("loss", average_loss / max_iter, COUNT)
+                self.writer.add_scalar("correctness", correctness, COUNT)
+            self.print_result((epoch, max_epoch), (max_iter, max_iter), loss, begin=begin, timing=True)
+            try:
+                if best_loss >= average_loss:
+                    torch.save(layer.state_dict(), 'model_weights.pth')
+                    torch.save(self._model.state_dict(), 'down_stream_bert.pth')
+                    best_loss = average_loss
+                torch.save(layer.state_dict(), 'model_weights2.pth')
+                torch.save(self._model.state_dict(), 'down_stream_bert.pth')
+            except Exception as e:
+                print(e)
+        self.print_result((max_epoch, max_epoch), (max_iter, max_iter), loss, begin=begin, timing=True)
         if self.writer is not None and self.tensorboard_process is not None:
             self.writer.close()
             self.tensorboard_process.terminate()
