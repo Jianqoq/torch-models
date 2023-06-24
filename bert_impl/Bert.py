@@ -114,8 +114,8 @@ class Bert(Module, BaseEstimator):
         trainr = Train(self, optimizr)
         trainr.add_bar('Epoch', 'Iter')
         trainr.add_metrics('loss', float)
-        trainer.down_stream(batch, max_epoch, layer, log_dir="Bert_down_stream", log=True,
-                            log_file_name="Bert_down_stream", monitor=False)
+        trainer.down_stream(batch, max_epoch, layer, log_dir="../Bert_down_stream", log=True,
+                            log_file_name="../Bert_down_stream", monitor=False)
 
     @staticmethod
     def get_total_steps(files_list, batch_size, _max_epoch):
@@ -288,7 +288,7 @@ if __name__ == "__main__":
     _num_layers = 12
     vocab_size = _tokenizer.get_vocab_size()
     bert = Bert(_embedding_dim, _hidden_size, _num_head, 128, _num_layers, _tokenizer)
-    bert.load_state_dict(torch.load("bert.pth"))
+    bert.load_state_dict(torch.load("../bert_impl_weights/bert.pth"))
     bert.train()
     # layer = FeedForward2(384, 2, 3072, device=bert.device)
     layer = Linear(384, 2, device=bert.device)
@@ -296,5 +296,5 @@ if __name__ == "__main__":
     trainer = Train(bert, optimizer)
     trainer.add_bar('Epoch', 'Iter')
     trainer.add_metrics('loss', float)
-    trainer.down_stream(batch, max_epoch, layer, log_dir="Bert_down_stream", log=True,
-                        log_file_name="Bert_down_stream", monitor=False)
+    trainer.down_stream(batch, max_epoch, layer, log_dir="../Bert_down_stream", log=True,
+                        log_file_name="../Bert_down_stream", monitor=False)

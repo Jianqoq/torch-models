@@ -1,10 +1,7 @@
-import random
-
 import torch
-from matplotlib import pyplot as plt
 from sklearn.model_selection import RandomizedSearchCV
 from tokenizers.implementations import BertWordPieceTokenizer
-from Bert import generate_data, Bert, generate_list_data
+from bert_impl.Bert import Bert, generate_list_data
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -56,9 +53,3 @@ if __name__ == "__main__":
     print("Best parameters found: ", best_params)
     results = random_search.cv_results_
     print(results)
-    # plt.plot(results['mean_train_score'], label='train')
-    # plt.plot(results['mean_test_score'], label='validation')
-    # plt.xlabel('Hyperparameter combinations')
-    # plt.ylabel('Accuracy')
-    # plt.legend()
-    # plt.savefig('result.png')

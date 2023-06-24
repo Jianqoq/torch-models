@@ -1793,10 +1793,10 @@ class Train(printProcess):
             except Exception as e:
                 raise e
 
-        question = torch.load("amazon_sentences.pth")
+        question = torch.load("bert_impl_data/amazon_sentences.pth")
         train_question = question[:int(len(question)*0.8)]
         test_question = question[int(len(question)*0.8):]
-        answers = torch.load("amazon_labels.pth")
+        answers = torch.load("bert_impl_data/amazon_labels.pth")
         train_answer = answers[:int(len(question)*0.8)]
         test_answer = answers[int(len(question)*0.8):]
         for epoch in range(max_epoch):
@@ -1829,8 +1829,8 @@ class Train(printProcess):
                     if average_loss / max_iter < min_loss:
                         min_loss = average_loss
                         try:
-                            torch.save(layer.state_dict(), 'down_stream.pth')
-                            torch.save(self._model.state_dict(), 'down_stream_bert.pth')
+                            torch.save(layer.state_dict(), 'bert_impl_weights/down_stream.pth')
+                            torch.save(self._model.state_dict(), 'bert_impl_weights/down_stream_bert.pth')
                         except Exception as e:
                             print(e)
                 except ZeroDivisionError:
@@ -1842,10 +1842,10 @@ class Train(printProcess):
             try:
                 if best_loss >= average_loss:
                     torch.save(layer.state_dict(), 'model_weights.pth')
-                    torch.save(self._model.state_dict(), 'down_stream_bert.pth')
+                    torch.save(self._model.state_dict(), 'bert_impl_weights/down_stream_bert.pth')
                     best_loss = average_loss
                 torch.save(layer.state_dict(), 'model_weights2.pth')
-                torch.save(self._model.state_dict(), 'down_stream_bert.pth')
+                torch.save(self._model.state_dict(), 'bert_impl_weights/down_stream_bert.pth')
             except Exception as e:
                 print(e)
         self.print_result((max_epoch, max_epoch), (max_iter, max_iter), loss, begin=begin, timing=True)
