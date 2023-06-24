@@ -1,7 +1,4 @@
 import json
-import os
-import sys
-
 import torch
 from sklearn.base import BaseEstimator
 from torch import optim
@@ -9,7 +6,6 @@ from torch.cuda.amp import autocast
 from torch.nn import Module, MultiheadAttention, Linear, Embedding, LayerNorm, ModuleList, GELU, Dropout, ReLU
 from tokenizers.implementations import BertWordPieceTokenizer
 from layers import Train
-from transformers import get_linear_schedule_with_warmup
 torch.random.manual_seed(42)
 torch.cuda.manual_seed_all(42)
 torch.backends.cudnn.deterministic = True
@@ -164,7 +160,7 @@ class Bert(Module, BaseEstimator):
                 _count += 1
         return -float(total_loss / _count)
 
-    def down_stream(self, question, answer, batch_size):
+    def down_stream(self, question, answer, batch_size, layer):
         correct = torch.tensor(0., device=self.device)
         count = 0
         self.eval()
