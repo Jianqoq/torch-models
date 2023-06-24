@@ -137,7 +137,7 @@ def positionalEncoding(x):  # x shape (batch, seq_len, embedding_dim)
 #     string = fp.readlines()
 # preprocess = Preprocess(string, ' ', '.')
 train_questions, test_questions, train_answer, test_answer, word_id, id_word = get_question_and_answer(
-    r"C:\Users\123\PycharmProjects\torch-models\data-set\symbolic computation\addition_shuffle2.txt",
+    r"/data-set/symbolic computation/addition_shuffle2.txt",
     torch=True, train_ratio=0.96)
 _pad_index = -1
 _vocab_size = len(word_id)
@@ -154,5 +154,5 @@ transformer.train()
 optimizer = torch.optim.Adam(transformer.parameters())
 trainer = Train(transformer, optimizer)
 trainer.PYTORCH_train(train_questions, train_answer, test_questions, test_answer, batch,
-                      max_epoch, word_id, id_word, log_dir="runs", log=True,
-                      log_file_name="Transformer")
+                      max_epoch, word_id, id_word, log_dir="../runs", log=True,
+                      log_file_name="")

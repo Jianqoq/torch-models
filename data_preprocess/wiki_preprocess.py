@@ -321,11 +321,11 @@ def get_train(path, cores=None, pattern_list=None):
     word_id["[SEP]"] = 3
     id_word[3] = "[SEP]"
 
-    with open("saved_word_id.json", "w") as fp:
+    with open("../saved_word_id.json", "w") as fp:
         json.dump(word_id, fp, indent=4)
-    with open("saved_id_word.json", "w", encoding="utf-8") as fp:
+    with open("../saved_id_word.json", "w", encoding="utf-8") as fp:
         json.dump(id_word, fp, indent=4)
-    with open("saved_corpus2.json", "w", encoding="utf-8") as fp:
+    with open("../saved_corpus2.json", "w", encoding="utf-8") as fp:
         fp.write(json.dumps({"corpus": corpus}, indent=4))
 
     return word_id, id_word
@@ -360,7 +360,7 @@ def search_word(path, words, char_list=None, cores=None, save_result=False):
                     task.append((file, words))
                 articles += 1
     if save_result:
-        with open("search_result.json", "w", encoding="utf-8") as fp:
+        with open("../search_result.json", "w", encoding="utf-8") as fp:
             dictionary = {}
             for word, file, article in o:
                 dictionary[file] = (word, article)

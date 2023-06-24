@@ -64,27 +64,27 @@ class MyTest(unittest.TestCase):
                                             for idx, i in enumerate(matches) if i.ruleId not in rule_list
                                         }
                                     )
-                with open(r"error_container.json", "r", encoding="utf-8") as f:
+                with open(r"../error_container.json", "r", encoding="utf-8") as f:
                     try:
                         past = json.load(f)
                     except json.decoder.JSONDecodeError:
                         past = []
                     if past and len(past) < len(error_sentence):
                         f.close()
-                        with open(r"error_container2.json", "w", encoding="utf-8") as file_pointer:
+                        with open(r"../error_container2.json", "w", encoding="utf-8") as file_pointer:
                             json.dump(error_sentence, file_pointer, indent=4)
                         tool.close()
                         self.assertGreater(len(past), len(error_sentence))
                     elif len(past):
                         f.close()
-                        with open(r"error_container.json", "w", encoding="utf-8") as file_pointer:
+                        with open(r"../error_container.json", "w", encoding="utf-8") as file_pointer:
                             json.dump(error_sentence, file_pointer, indent=4)
                             file_pointer.close()
                             tool.close()
                             self.assertGreater(len(past), len(error_sentence))
                     else:
                         f.close()
-                        with open(r"error_container.json", "w", encoding="utf-8") as file_pointer:
+                        with open(r"../error_container.json", "w", encoding="utf-8") as file_pointer:
                             json.dump(error_sentence, file_pointer, indent=4)
                             file_pointer.close()
                             self.assertGreater(1, 0)
