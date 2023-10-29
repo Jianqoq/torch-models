@@ -397,6 +397,22 @@ class Preprocess:
             append(word_id[i])
         return word_id, id_word, corpus
 
+    @staticmethod
+    def get_word_id_transformer(text):
+        """has to be unique for each element"""
+        word_id = {}
+        id_word = {}
+        corpus = []
+        append = corpus.append
+        counter = 0
+        for index, i in enumerate(text):
+            if i not in word_id:
+                word_id[i] = counter
+                id_word[counter] = i
+                counter += 1
+            append(word_id[i])
+        return word_id, id_word, corpus
+
     def get_single_context(self, id_word: dict, word_id: dict, corpus: list, word: str,
                            window: int):  # list bound check
         text = self.text
@@ -1431,7 +1447,7 @@ def get_question_and_answer(*filename, train_ratio=0.9, reverse=True, gpu=True, 
         for k in string:
             o += k
 
-    word_id, id_word, corpus = Preprocess.get_word_id(o)
+    word_id, id_word, corpus = Preprocess.get_word_id_transformer(o)
     question = []
     answer = []
     question_and_answer = o.split('\n')
@@ -1489,7 +1505,7 @@ def get_question_and_answer(*filename, train_ratio=0.9, reverse=True, gpu=True, 
 
 def evaluate(model, question, answer, word_id, id_word, size):
     answers = model.generate(question, word_id, size)
-    print(''.join(reversed([id_word[int(i)] for i in question[0]])), '=', ''.join(id_word[int(i)] for i in answers))
+    # print(''.join(reversed([id_word[int(i)] for i in question[0]])), '=', ''.join(id_word[int(i)] for i in answers))
     return 1 if answers == list(answer[:, 1:][0]) else 0
 
 
@@ -1635,18 +1651,16 @@ class Train(printProcess):
                 if iters % 10 == 0:
                     average_loss = loss_cumulate / 10
                     loss_cumulate = 0
-                    self.print_result(epoch, max_epoch, iters, max_iter, begin, average_loss,
-                                      self._optimizer.param_groups[0]['lr'])
-            self.print_result(epoch, max_epoch, max_iter, max_iter, begin, average_loss,
-                              self._optimizer.param_groups[0]['lr'])
+                    self.print_result((epoch, max_epoch), (iters, max_iter), average_loss,
+                                      self._optimizer.param_groups[0]['lr'], begin=begin, timing=True)
+                    if self.writer is not None:
+                        self.writer.add_scalar("Loss", average_loss, epoch)
             for i in range(len(test_question)):
                 question, answer = test_question[[i]], test_answers[[i]]
                 correct += evaluate(self._model, question, answer, word_id, id_word, size)
             if self.writer is not None:
                 self.writer.add_scalar("Correctness", correct / len(test_question), epoch)
 
-        self.print_result(max_epoch, max_epoch, max_iter, max_iter, begin, average_loss,
-                          self._optimizer.param_groups[0]['lr'])
         if self.writer is not None and self.tensorboard_process is not None:
             self.writer.close()
             self.tensorboard_process.terminate()
@@ -1793,10 +1807,10 @@ class Train(printProcess):
             except Exception as e:
                 raise e
 
-        question = torch.load("bert_impl_data/amazon_sentences.pth")
+        question = torch.load("../bert_impl_data/amazon_sentences.pth")
         train_question = question[:int(len(question)*0.8)]
         test_question = question[int(len(question)*0.8):]
-        answers = torch.load("bert_impl_data/amazon_labels.pth")
+        answers = torch.load("../bert_impl_data/amazon_labels.pth")
         train_answer = answers[:int(len(question)*0.8)]
         test_answer = answers[int(len(question)*0.8):]
         for epoch in range(max_epoch):
@@ -1829,8 +1843,8 @@ class Train(printProcess):
                     if average_loss / max_iter < min_loss:
                         min_loss = average_loss
                         try:
-                            torch.save(layer.state_dict(), 'bert_impl_weights/down_stream.pth')
-                            torch.save(self._model.state_dict(), 'bert_impl_weights/down_stream_bert.pth')
+                            torch.save(layer.state_dict(), '../bert_impl_weights/down_stream.pth')
+                            torch.save(self._model.state_dict(), '../bert_impl_weights/down_stream_bert.pth')
                         except Exception as e:
                             print(e)
                 except ZeroDivisionError:
@@ -1842,10 +1856,10 @@ class Train(printProcess):
             try:
                 if best_loss >= average_loss:
                     torch.save(layer.state_dict(), 'model_weights.pth')
-                    torch.save(self._model.state_dict(), 'bert_impl_weights/down_stream_bert.pth')
+                    torch.save(self._model.state_dict(), '../bert_impl_weights/down_stream_bert.pth')
                     best_loss = average_loss
                 torch.save(layer.state_dict(), 'model_weights2.pth')
-                torch.save(self._model.state_dict(), 'bert_impl_weights/down_stream_bert.pth')
+                torch.save(self._model.state_dict(), '../bert_impl_weights/down_stream_bert.pth')
             except Exception as e:
                 print(e)
         self.print_result((max_epoch, max_epoch), (max_iter, max_iter), loss, begin=begin, timing=True)
