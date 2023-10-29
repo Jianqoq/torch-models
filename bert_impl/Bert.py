@@ -57,7 +57,7 @@ class Bert(Module, BaseEstimator):
             inp = i.forward(inp, pad)
         return inp
         # return self.linear.forward(inp)
-
+    
     def generate_predicted_text(self, questions, mask0, prob, to_save, key, monitor=False):
         ques_str = self.tokenizer.decode(questions.tolist())
         prob_mask, not_prob_mask = self.get_prob_mask(mask0, prob)
@@ -168,10 +168,15 @@ class Bert(Module, BaseEstimator):
             try:
                 with torch.no_grad():
                     score = self.forward(train, mask.to(device=self.device))
-                    score = layer(score)[:, 0, :]
+                    # for NER
+                    score = layer(score)
+                    # for classification
+                    # score = layer(score)[:, 0, :]
                     score = self.softmax(score)
                     score = torch.argmax(score, dim=-1)
-                return score == answers
+                res = score[mk]
+                ans = answers[mk]
+                return torch.eq(res, ans)
             except Exception as e:
                 raise e
         max_iter = len(question) // batch_size
@@ -181,8 +186,10 @@ class Bert(Module, BaseEstimator):
                 batch_question = question[start:(i + 1) * batch_size + 1].to(device=self.device)
                 answers = answer[start:(i + 1) * batch_size + 1].to(device=self.device)
                 mask = batch_question != 0
+                mk = (answers != -1)
                 corrects = run(batch_question)
-                correct += sum(corrects) / len(corrects)
+
+                correct += torch.sum(corrects) / torch.sum(mk)
                 count += 1
         self.train()
         return correct / count
@@ -266,7 +273,7 @@ def generate_steps(files_list):
 
 
 if __name__ == "__main__":
-    _tokenizer = BertWordPieceTokenizer("custom/vocab.txt")
+    _tokenizer = BertWordPieceTokenizer("../custom/vocab.txt")
     # _tokenizer = BertWordPieceTokenizer("/mnt/c/Users/123/PycharmProjects/torch-models/custom/vocab.txt")
     char_list = [f"{chr(i)}{chr(j)}" for i in range(65, 91) for j in range(65, 91)]
     char_list = char_list[:char_list.index('FT') + 1]
@@ -292,5 +299,5 @@ if __name__ == "__main__":
     trainer = Train(bert, optimizer)
     trainer.add_bar('Epoch', 'Iter')
     trainer.add_metrics('loss', float)
-    trainer.down_stream(batch, max_epoch, layer, log_dir="../Bert_down_stream", log=True,
+    trainer.down_stream(batch, max_epoch, layer, log_dir="../Bert_down_stream", log=False,
                         log_file_name="../Bert_down_stream", monitor=False)
