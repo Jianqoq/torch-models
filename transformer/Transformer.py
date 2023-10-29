@@ -19,6 +19,7 @@ class Transformer(Module):
         self.decoder = ModuleList([Decoder(embedding_dim, hidden_size, num_head) for _ in range(num_layers)])
         self.linear = Linear(embedding_dim, corpus)
         self.loss = CrossEntropyLoss(ignore_index=_pad_index)
+        self.softmax = Softmax(dim=-1)
         self._pad_index = _pad_index
         self.num_heads = num_head
         self.offset = None
@@ -137,8 +138,8 @@ def positionalEncoding(x):  # x shape (batch, seq_len, embedding_dim)
 #     string = fp.readlines()
 # preprocess = Preprocess(string, ' ', '.')
 train_questions, test_questions, train_answer, test_answer, word_id, id_word = get_question_and_answer(
-    r"/data-set/symbolic computation/addition_shuffle2.txt",
-    torch=True, train_ratio=0.96)
+    r"../data-set/symbolic computation/addition_shuffle2.txt",
+    torch=True, train_ratio=0.85)
 _pad_index = -1
 _vocab_size = len(word_id)
 _embedding_dim = 128
@@ -151,8 +152,11 @@ _num_layers = 2
 transformer = Transformer(_vocab_size, _embedding_dim, _hidden_size, _num_head, _pad_index, _num_layers)
 transformer.to(device)
 transformer.train()
-optimizer = torch.optim.Adam(transformer.parameters())
+optimizer = torch.optim.Adam(transformer.parameters(), lr=0.0001)
 trainer = Train(transformer, optimizer)
+trainer.add_bar('Epoch', 'Iter')
+trainer.add_metrics('loss', float)
+trainer.add_metrics('lr', float)
 trainer.PYTORCH_train(train_questions, train_answer, test_questions, test_answer, batch,
                       max_epoch, word_id, id_word, log_dir="../runs", log=True,
                       log_file_name="")
