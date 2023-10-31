@@ -68,6 +68,8 @@ class MultiHeadAttention:
         """
         assume table is (5, 5), where first 10 means the word in the sentence, and the second 10 means the weight of
         the word in the sentence based on the first word.
+        
+        for self-attention, the query, key and value are the same, which means the score table is a square matrix.
                          Today  is   a   good   day
         table = Today   [[0.1, 0.2, 0.6, 0.05, 0.05]
                 is       [0.05, 0.6, 0.2, 0.1, 0.05]
